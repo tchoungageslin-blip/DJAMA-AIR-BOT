@@ -1,0 +1,282 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL")
+}
+
+// ============================================
+// CLIENTS
+// ============================================
+enum ClientType {
+  NEW
+  RECURRENT
+  VIP
+}
+
+model Client {
+  id            String     @id @default(cuid())
+  phoneNumber   String     @unique @map("phone_number")
+  firstName     String?    @map("first_name")
+  lastName      String?    @map("last_name")
+  clientType    ClientType @default(NEW) @map("client_type")
+  language      String     @default("fr")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  preferences   Preferences?
+  sessions      Session[]
+  leadsFret     LeadFret[]
+  leadsBillet   LeadBillet[]
+  orders        Order[]
+  messages      Message[]
+
+  @@map("clients")
+}
+
+model Preferences {
+  id                    String   @id @default(cuid())
+  clientId              String   @unique @map("client_id")
+  frequentDestinations  String[] @default([]) @map("frequent_destinations")
+  frequentGoods         String[] @default([]) @map("frequent_goods")
+  preferredMode         String?  @map("preferred_mode") // aerien, maritime, dhl
+  notes                 String?
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("preferences")
+}
+
+// ============================================
+// SESSIONS & CONVERSATIONS
+// ============================================
+enum SessionStatus {
+  BOT_ACTIVE
+  HUMAN_HANDOFF
+  HUMAN_ACTIVE
+  RESOLVED
+  CLOSED
+}
+
+enum SessionIntent {
+  FRET
+  BILLETTERIE
+  PACK
+  COMPLAINT
+  GENERAL
+  UNKNOWN
+}
+
+model Session {
+  id            String        @id @default(cuid())
+  clientId      String        @map("client_id")
+  status        SessionStatus @default(BOT_ACTIVE)
+  currentIntent SessionIntent @default(UNKNOWN) @map("current_intent")
+  agentId       String?       @map("agent_id")
+  tags          String[]      @default([])
+  aiSummary     String?       @map("ai_summary")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+  closedAt      DateTime?     @map("closed_at")
+
+  client   Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  agent    Agent?    @relation(fields: [agentId], references: [id])
+  messages Message[]
+
+  @@map("sessions")
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  sessionId   String   @map("session_id")
+  clientId    String   @map("client_id")
+  sender      String   // "client", "bot", "agent"
+  content     String
+  mediaUrl    String?  @map("media_url")
+  mediaType   String?  @map("media_type") // image, document, audio
+  metadata    Json?    // extracted data from vision, etc.
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("messages")
+}
+
+// ============================================
+// LEADS - FRET
+// ============================================
+enum ShippingMode {
+  AERIEN
+  MARITIME
+  DHL_EXPRESS
+}
+
+enum ColisNature {
+  NORMAL
+  FRAGILE
+  SENSIBLE
+}
+
+model LeadFret {
+  id              String       @id @default(cuid())
+  clientId        String       @map("client_id")
+  sessionId       String?      @map("session_id")
+  goodsNature     String?      @map("goods_nature")
+  colisNature     ColisNature  @default(NORMAL) @map("colis_nature")
+  weightReal      Float?       @map("weight_real")
+  weightVolumetric Float?     @map("weight_volumetric")
+  weightBillable  Float?       @map("weight_billable")
+  lengthCm        Float?       @map("length_cm")
+  widthCm         Float?       @map("width_cm")
+  heightCm        Float?       @map("height_cm")
+  origin          String?
+  destination     String?      // Douala or Yaounde
+  shippingMode    ShippingMode @default(AERIEN) @map("shipping_mode")
+  estimatedPrice  Int?         @map("estimated_price") // in FCFA
+  packType        String?      @map("pack_type") // ESSENTIEL, BUSINESS, VIP
+  isSensitive     Boolean      @default(false) @map("is_sensitive")
+  sensitiveReason String?      @map("sensitive_reason")
+  createdAt       DateTime     @default(now()) @map("created_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("leads_fret")
+}
+
+// ============================================
+// LEADS - BILLETTERIE
+// ============================================
+enum TicketType {
+  ALLER_SIMPLE
+  ALLER_RETOUR
+}
+
+model LeadBillet {
+  id            String     @id @default(cuid())
+  clientId      String     @map("client_id")
+  sessionId     String?    @map("session_id")
+  departure     String?
+  destination   String?
+  dateDepart    DateTime?  @map("date_depart")
+  dateRetour    DateTime?  @map("date_retour")
+  paxCount      Int?       @map("pax_count")
+  paxDetails    String?    @map("pax_details") // e.g. "2 adultes, 1 enfant"
+  ticketType    TicketType @default(ALLER_SIMPLE) @map("ticket_type")
+  createdAt     DateTime   @default(now()) @map("created_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("leads_billet")
+}
+
+// ============================================
+// ORDERS (Generated from leads after qualification)
+// ============================================
+enum OrderType {
+  FRET
+  BILLETTERIE
+  PACK
+}
+
+enum OrderStatus {
+  NOUVEAU
+  PRIS_EN_CHARGE
+  EN_COURS
+  LIVRE
+  ANNULE
+  HANDOFF
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique @map("order_number") // FR-1042, BL-501, PK-201
+  clientId        String      @map("client_id")
+  orderType       OrderType   @map("order_type")
+  status          OrderStatus @default(NOUVEAU)
+  data            Json        // Full order data (flexible)
+  estimatedPrice  Int?        @map("estimated_price")
+  finalPrice      Int?        @map("final_price")
+  assignedAgent   String?     @map("assigned_agent")
+  shippingMark    String?     @map("shipping_mark")
+  notes           String?
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("orders")
+}
+
+// ============================================
+// AGENTS (Dashboard users)
+// ============================================
+enum AgentRole {
+  ADMIN
+  AGENT_FRET
+  AGENT_BILLETTERIE
+  SUPERVISEUR
+}
+
+model Agent {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  fullName      String    @map("full_name")
+  role          AgentRole @default(AGENT_FRET)
+  isActive      Boolean   @default(true) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  sessions Session[]
+
+  @@map("agents")
+}
+
+// ============================================
+// PRICING GRIDS (Editable by employees)
+// ============================================
+model PricingGrid {
+  id          String   @id @default(cuid())
+  mode        String   // aerien_chine, aerien_international, maritime, dhl, gros_volumes
+  origin      String   // chine, europe, usa, etc.
+  rules       Json     // Array of {min_weight, max_weight, price_per_unit, unit}
+  currency    String   @default("FCFA")
+  validFrom   DateTime @map("valid_from")
+  validUntil  DateTime? @map("valid_until")
+  updatedBy   String?  @map("updated_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("pricing_grids")
+}
+
+// ============================================
+// SETTINGS (App-wide configuration)
+// ============================================
+model Settings {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+
+  @@map("settings")
+}
+
+// ============================================
+// NOTIFICATIONS LOG
+// ============================================
+model Notification {
+  id          String   @id @default(cuid())
+  type        String   // handoff, urgent, error, sla_breach
+  channel     String   // whatsapp, email, dashboard
+  recipient   String
+  message     String
+  sessionId   String?  @map("session_id")
+  sent        Boolean  @default(false)
+  sentAt      DateTime? @map("sent_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("notifications")
+}
