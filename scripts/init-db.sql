@@ -4,17 +4,13 @@
 -- ============================================
 
 -- Insert default admin agent
--- NOTE: Default password is "djama2025"
--- The hash below uses SHA-256 with JWT_SECRET[:16] as salt
--- You MUST regenerate this hash after setting your JWT_SECRET in .env
--- Use: python -c "import hashlib; print(hashlib.sha256('YOUR_JWT_SECRET_FIRST_16_CHARS' + 'djama2025').encode()).hexdigest())"
--- Or simply use the /api/dashboard/auth/register endpoint after first login
+-- Email: airdjama@gmail.com | Password: airdjama2026
+-- Hash: SHA-256("change-me-in-pro" + "airdjama2026")
 INSERT INTO agents (id, email, password_hash, full_name, role, is_active, created_at)
 VALUES (
   gen_random_uuid(),
-  'admin@djamaairlogistics.com',
-  -- Hash for password "djama2025" with default JWT_SECRET "change-me-in-pro"
-  'PLACEHOLDER_HASH_REGENERATE_AFTER_SETTING_JWT_SECRET',
+  'airdjama@gmail.com',
+  'c08e33232ccd460aa5cf233eb545e8210108c9a1750a954818bdc217f2515719',
   'Abdelkarim',
   'ADMIN',
   true,

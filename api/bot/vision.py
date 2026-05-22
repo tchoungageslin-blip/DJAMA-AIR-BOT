@@ -10,7 +10,10 @@ class VisionProcessor:
     """Processes images and PDFs using GPT-4o Vision."""
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = OpenAI(
+            api_key=settings.OPENROUTER_API_KEY,
+            base_url=settings.OPENROUTER_BASE_URL
+        )
 
     def analyze_image(self, image_data: bytes, media_type: str = "image/jpeg") -> Dict:
         """
@@ -20,7 +23,7 @@ class VisionProcessor:
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
         response = self.client.chat.completions.create(
-            model="gpt-4o",
+            model=settings.LLM_MODEL,
             messages=[
                 {
                     "role": "user",

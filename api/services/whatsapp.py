@@ -4,17 +4,29 @@ from api.config import settings
 
 
 class WhatsAppService:
-    """Service for sending messages via Vendrix.net WhatsApp API."""
+    """Service for sending messages via standard Meta WhatsApp Cloud API."""
 
     def __init__(self):
-        self.api_url = settings.VENDRIX_API_URL
-        self.api_key = settings.VENDRIX_API_KEY
-        self.phone_number_id = settings.WHATSAPP_PHONE_NUMBER_ID
+        self.api_version = "v19.0"
+        # Primary: Meta WhatsApp Cloud API credentials
+        self.phone_number_id = settings.WHATSAPP_PHONE_NUMBER_ID or ""
+        self.access_token = settings.WHATSAPP_TOKEN or settings.VENDRIX_API_KEY or ""
+
+        # Build API URL
+        if self.phone_number_id and self.phone_number_id.replace(" ", "").isdigit():
+            self.api_url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id.strip()}"
+        elif settings.VENDRIX_API_URL and settings.VENDRIX_API_URL != "https://api.vendrix.net":
+            self.api_url = settings.VENDRIX_API_URL
+        else:
+            self.api_url = f"https://graph.facebook.com/{self.api_version}/MISSING_PHONE_ID"
+            print(f"[WHATSAPP WARNING] No phone_number_id configured! Token set: {bool(self.access_token)}")
+
+        print(f"[WHATSAPP INIT] api_url={self.api_url}, token_len={len(self.access_token)}")
 
     @property
     def headers(self):
         return {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
 
@@ -22,9 +34,10 @@ class WhatsAppService:
         """Send a text message to a WhatsApp number."""
         payload = {
             "messaging_product": "whatsapp",
+            "recipient_type": "individual",
             "to": to,
             "type": "text",
-            "text": {"body": message}
+            "text": {"preview_url": False, "body": message}
         }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -66,9 +79,7 @@ class WhatsAppService:
             return response.json()
 
     async def send_interactive_list(self, to: str, body: str, button_text: str, sections: list) -> dict:
-        """Send interactive list message.
-        sections: [{"title": "Section", "rows": [{"id": "row_id", "title": "Row", "description": "Desc"}]}]
-        """
+        """Send interactive list message."""
         payload = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -103,21 +114,22 @@ class WhatsAppService:
         return await self.send_text_message(to, message)
 
     async def download_media(self, media_id: str) -> Optional[bytes]:
-        """Download media file from WhatsApp."""
+        """Download media file from WhatsApp Cloud API."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # First get the media URL
+            # First get the media URL from Graph API
+            meta_url = f"https://graph.facebook.com/{self.api_version}/{media_id}"
             response = await client.get(
-                f"{self.api_url}/media/{media_id}",
-                headers=self.headers
+                meta_url,
+                headers={"Authorization": f"Bearer {self.access_token}"}
             )
             response.raise_for_status()
             media_url = response.json().get("url")
 
             if media_url:
-                # Download the actual file
+                # Download the actual file from the media URL using bearer token
                 file_response = await client.get(
                     media_url,
-                    headers=self.headers
+                    headers={"Authorization": f"Bearer {self.access_token}"}
                 )
                 file_response.raise_for_status()
                 return file_response.content

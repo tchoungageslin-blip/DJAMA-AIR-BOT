@@ -3,8 +3,10 @@ from typing import Optional
 
 
 class Settings:
-    # OpenAI
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    # LLM (OpenRouter)
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o")
 
     # Database
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
@@ -12,11 +14,15 @@ class Settings:
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "")
 
-    # Vendrix (WhatsApp)
+    # WhatsApp (Cloud API or Vendrix)
+    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("EXPO_PUBLIC_WHATSAPP_PHONE_ID", os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""))
+    WHATSAPP_TOKEN: str = os.getenv("EXPO_PUBLIC_WHATSAPP_TOKEN", "")
     VENDRIX_API_KEY: str = os.getenv("VENDRIX_API_KEY", "")
     VENDRIX_API_URL: str = os.getenv("VENDRIX_API_URL", "https://api.vendrix.net")
-    VENDRIX_WEBHOOK_SECRET: str = os.getenv("VENDRIX_WEBHOOK_SECRET", "")
-    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+    VENDRIX_WEBHOOK_SECRET: str = os.getenv("VENDRIX_WEBHOOK_SECRET", "djama-secret-123")
+
+    # Meta WhatsApp Cloud API webhook verification token
+    WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", os.getenv("VENDRIX_WEBHOOK_SECRET", "djama-secret-123"))
 
     # Auth
     JWT_SECRET: str = os.getenv("JWT_SECRET", "change-me-in-production")

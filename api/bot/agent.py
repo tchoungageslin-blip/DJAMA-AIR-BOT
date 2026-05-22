@@ -1,6 +1,7 @@
 import json
+import traceback
 from typing import Dict, Optional, Tuple
-from openai import OpenAI
+from openai import AsyncOpenAI
 from api.config import settings
 from api.bot.prompts import SYSTEM_PROMPT, HANDOFF_SUMMARY_PROMPT
 from api.bot.pricing import pricing_engine
@@ -22,8 +23,14 @@ SENSITIVE_KEYWORDS = [
 class DjamaAgent:
     """Main AI agent orchestrating the conversation flow."""
 
-    def __init__(self):
-        self.openai = OpenAI(api_key=settings.OPENAI_API_KEY)
+    def _create_openai_client(self) -> AsyncOpenAI:
+        """Create a fresh OpenAI client per request to avoid stale connections on Vercel serverless."""
+        return AsyncOpenAI(
+            api_key=settings.OPENROUTER_API_KEY,
+            base_url=settings.OPENROUTER_BASE_URL,
+            max_retries=2,
+            timeout=25.0,
+        )
 
     async def handle_message(self, phone_number: str, message_text: str,
                              media_data: bytes = None, media_type: str = None) -> str:
@@ -154,7 +161,7 @@ class DjamaAgent:
         return "\n".join(context_parts)
 
     async def _get_ai_response(self, phone_number: str, user_message: str, context: str) -> str:
-        """Get response from GPT-4o."""
+        """Get response from GPT-4o via OpenRouter."""
         # Build messages array with history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -169,14 +176,22 @@ class DjamaAgent:
         # Add current message
         messages.append({"role": "user", "content": user_message or "[Le client a envoyé un média]"})
 
-        response = self.openai.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=300,
-            temperature=0.7,
-        )
-
-        return response.choices[0].message.content.strip()
+        # Fresh client per request to prevent stale serverless connections
+        client = self._create_openai_client()
+        try:
+            response = await client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=messages,
+                max_tokens=300,
+                temperature=0.7,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[AGENT LLM ERROR] {type(e).__name__}: {e}")
+            print(f"[AGENT LLM TRACEBACK] {traceback.format_exc()}")
+            raise
+        finally:
+            await client.close()
 
     async def _trigger_handoff(self, client: Dict, session: Dict,
                                phone_number: str, reason: str, tags: list = None) -> str:
@@ -218,17 +233,20 @@ class DjamaAgent:
             for m in messages
         ])
 
-        response = self.openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": HANDOFF_SUMMARY_PROMPT},
-                {"role": "user", "content": conversation}
-            ],
-            max_tokens=300,
-            temperature=0.3,
-        )
-
-        return response.choices[0].message.content.strip()
+        client = self._create_openai_client()
+        try:
+            response = await client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": HANDOFF_SUMMARY_PROMPT},
+                    {"role": "user", "content": conversation}
+                ],
+                max_tokens=300,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content.strip()
+        finally:
+            await client.close()
 
 
 djama_agent = DjamaAgent()

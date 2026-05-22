@@ -4,11 +4,7 @@
   "outputDirectory": ".next",
   "rewrites": [
     {
-      "source": "/api/webhook",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/dashboard/:path*",
+      "source": "/api/:path*",
       "destination": "/api/index"
     }
   ],

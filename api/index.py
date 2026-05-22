@@ -1,6 +1,10 @@
 import json
 import hmac
 import hashlib
+import traceback
+import asyncio
+import time
+from collections import OrderedDict
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -13,6 +17,31 @@ from api.services.session import session_manager
 from api.services.auth import auth_service
 from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
 
+
+# Message deduplication cache (WhatsApp retries messages)
+_processed_messages: OrderedDict = OrderedDict()
+_DEDUP_MAX_SIZE = 200
+_DEDUP_TTL_SECONDS = 120
+
+
+def _is_duplicate_message(message_id: str) -> bool:
+    """Check and track message IDs to prevent duplicate processing."""
+    now = time.time()
+    # Evict old entries
+    while _processed_messages:
+        oldest_id, oldest_time = next(iter(_processed_messages.items()))
+        if now - oldest_time > _DEDUP_TTL_SECONDS:
+            _processed_messages.pop(oldest_id)
+        else:
+            break
+    # Cap size
+    while len(_processed_messages) >= _DEDUP_MAX_SIZE:
+        _processed_messages.popitem(last=False)
+    if message_id in _processed_messages:
+        return True
+    _processed_messages[message_id] = now
+    return False
+
 app = FastAPI(
     title="Djama Air Logistics Bot",
     version="1.0.0",
@@ -20,12 +49,12 @@ app = FastAPI(
     openapi_url="/api/openapi.json"
 )
 
-# CORS for dashboard
+# CORS for dashboard - SECURED
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[settings.APP_URL] if settings.APP_ENV == "production" else ["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -138,7 +167,8 @@ async def webhook_verify(request: Request):
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
 
-    if mode == "subscribe" and token == settings.VENDRIX_WEBHOOK_SECRET:
+    # CRYPTO-01: Constant time comparison to prevent timing attacks
+    if mode == "subscribe" and hmac.compare_digest(token.encode(), settings.WHATSAPP_VERIFY_TOKEN.encode()):
         return PlainTextResponse(content=challenge, status_code=200)
 
     raise HTTPException(status_code=403, detail="Verification failed")
@@ -147,28 +177,39 @@ async def webhook_verify(request: Request):
 @app.post("/api/webhook")
 async def webhook_receive(request: Request):
     """
-    Main webhook endpoint receiving messages from WhatsApp via Vendrix.
-    Process flow:
-    1. Parse incoming payload
-    2. Extract message data
-    3. Route to AI agent
-    4. Send response back via WhatsApp
+    Main webhook endpoint receiving messages from WhatsApp.
+    Processes messages within the request lifecycle to avoid Vercel event loop closure.
     """
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    # Parse WhatsApp Cloud API payload structure
+    tasks = []
     entry = body.get("entry", [])
     for e in entry:
-        changes = e.get("changes", [])
-        for change in changes:
+        for change in e.get("changes", []):
             value = change.get("value", {})
-            messages = value.get("messages", [])
+            for message in value.get("messages", []):
+                msg_id = message.get("id", "")
+                # Skip duplicate messages (WhatsApp retries)
+                if msg_id and _is_duplicate_message(msg_id):
+                    print(f"[WEBHOOK DEDUP] Skipping duplicate message: {msg_id}")
+                    continue
+                tasks.append(_process_message(message, value))
 
-            for message in messages:
-                await _process_message(message, value)
+    if tasks:
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=25.0
+            )
+            # Log any exceptions that were returned (not raised)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"[WEBHOOK GATHER ERROR] Task {i}: {type(result).__name__}: {result}")
+        except asyncio.TimeoutError:
+            print("[WEBHOOK] Processing timeout after 25s")
 
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
@@ -178,6 +219,8 @@ async def _process_message(message: dict, value: dict) -> None:
     phone_number = message.get("from", "")
     message_type = message.get("type", "")
     message_id = message.get("id", "")
+    print(f"[WEBHOOK PROCESS] Phone: {phone_number}, Type: {message_type}, ID: {message_id}")
+    print(f"[WEBHOOK RAW] Message: {json.dumps(message, ensure_ascii=False)}")
 
     # Extract text content
     text = ""
@@ -227,9 +270,10 @@ async def _process_message(message: dict, value: dict) -> None:
         if response:
             await whatsapp_service.send_text_message(phone_number, response)
     except Exception as e:
-        # Log error, don't crash webhook
-        # In production: log to error tracking service
-        print(f"Error processing message from {phone_number}: {str(e)}")
+        # Log error with full traceback for debugging
+        error_detail = traceback.format_exc()
+        print(f"[WEBHOOK ERROR] Phone: {phone_number}, Error: {str(e)}")
+        print(f"[WEBHOOK TRACEBACK] {error_detail}")
 
         # Notify about the error
         error_msg = (
@@ -238,8 +282,8 @@ async def _process_message(message: dict, value: dict) -> None:
         )
         try:
             await whatsapp_service.send_text_message(phone_number, error_msg)
-        except Exception:
-            pass
+        except Exception as send_err:
+            print(f"[WEBHOOK SEND ERROR] Failed to send error message: {send_err}")
 
 
 # ============================================
@@ -250,6 +294,118 @@ async def _process_message(message: dict, value: dict) -> None:
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "bot_enabled": session_manager.is_bot_enabled()}
+
+
+@app.post("/api/debug/test-message")
+async def debug_test_message(request: Request):
+    """Debug endpoint to test bot message processing directly."""
+    body = await request.json()
+    phone = body.get("phone", "23799999999")
+    text = body.get("text", "Bonjour")
+
+    try:
+        response = await djama_agent.handle_message(
+            phone_number=phone,
+            message_text=text
+        )
+        return {"status": "ok", "response": response}
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        return {
+            "status": "error",
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": error_detail
+        }
+
+
+@app.get("/api/debug/system-check")
+async def debug_system_check():
+    """Comprehensive system diagnostic - tests every component."""
+    results = {}
+
+    # 1. Database connectivity
+    try:
+        from api.db.connection import execute_query
+        db_result = execute_query("SELECT NOW() as ts, current_database() as db", fetch_one=True)
+        results["database"] = {"status": "ok", "timestamp": str(db_result["ts"]), "db": db_result["db"]}
+    except Exception as e:
+        results["database"] = {"status": "error", "error": str(e), "type": type(e).__name__}
+
+    # 2. Tables existence
+    try:
+        tables = ["clients", "sessions", "messages", "orders", "agents", "notifications"]
+        missing = []
+        for t in tables:
+            r = execute_query(f"SELECT COUNT(*) as cnt FROM {t}", fetch_one=True)
+            if r is None:
+                missing.append(t)
+        results["tables"] = {"status": "ok" if not missing else "error", "missing": missing}
+    except Exception as e:
+        results["tables"] = {"status": "error", "error": str(e), "type": type(e).__name__}
+
+    # 3. Redis / Session manager
+    try:
+        sm_status = {
+            "use_fallback": session_manager._use_fallback,
+            "bot_enabled": session_manager.is_bot_enabled(),
+        }
+        if not session_manager._use_fallback:
+            session_manager.redis_client.ping()
+            sm_status["redis_ping"] = "ok"
+        results["session_manager"] = {"status": "ok", **sm_status}
+    except Exception as e:
+        results["session_manager"] = {"status": "error", "error": str(e), "use_fallback": session_manager._use_fallback}
+
+    # 4. OpenAI/OpenRouter connectivity
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(
+            api_key=settings.OPENROUTER_API_KEY,
+            base_url=settings.OPENROUTER_BASE_URL,
+            max_retries=1,
+            timeout=15.0,
+        )
+        response = await client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            messages=[{"role": "user", "content": "Réponds juste 'OK'"}],
+            max_tokens=5,
+        )
+        ai_response = response.choices[0].message.content.strip()
+        await client.close()
+        results["openai"] = {"status": "ok", "response": ai_response, "model": settings.LLM_MODEL}
+    except Exception as e:
+        results["openai"] = {"status": "error", "error": str(e), "type": type(e).__name__,
+                             "base_url": settings.OPENROUTER_BASE_URL,
+                             "key_set": bool(settings.OPENROUTER_API_KEY)}
+
+    # 5. WhatsApp service config
+    try:
+        wa = whatsapp_service
+        wa_status = {
+            "api_url": wa.api_url,
+            "phone_number_id": wa.phone_number_id,
+            "token_set": bool(wa.access_token),
+            "token_length": len(wa.access_token) if wa.access_token else 0,
+        }
+        results["whatsapp"] = {"status": "ok" if wa.access_token and wa.phone_number_id else "warning", **wa_status}
+    except Exception as e:
+        results["whatsapp"] = {"status": "error", "error": str(e)}
+
+    # 6. Config summary
+    results["config"] = {
+        "app_env": settings.APP_ENV,
+        "llm_model": settings.LLM_MODEL,
+        "database_url_set": bool(settings.DATABASE_URL),
+        "redis_url_set": bool(settings.REDIS_URL),
+        "openrouter_key_set": bool(settings.OPENROUTER_API_KEY),
+        "whatsapp_phone_id_set": bool(settings.WHATSAPP_PHONE_NUMBER_ID),
+        "whatsapp_token_set": bool(settings.WHATSAPP_TOKEN),
+    }
+
+    # Overall
+    all_ok = all(r.get("status") == "ok" for r in results.values() if isinstance(r, dict) and "status" in r)
+    return {"overall": "ok" if all_ok else "issues_found", "components": results}
 
 
 @app.get("/api/dashboard/sessions")
@@ -425,25 +581,135 @@ async def get_stats():
         """SELECT
             COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) as sessions_today,
             COUNT(*) FILTER (WHERE status = 'HUMAN_HANDOFF') as pending_handoffs,
-            COUNT(*) FILTER (WHERE status = 'RESOLVED' AND updated_at::date = CURRENT_DATE) as resolved_today
+            COUNT(*) FILTER (WHERE status = 'RESOLVED' AND updated_at::date = CURRENT_DATE) as resolved_today,
+            COUNT(*) FILTER (WHERE status IN ('BOT_ACTIVE', 'HUMAN_HANDOFF', 'HUMAN_ACTIVE')) as active_sessions,
+            COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') as sessions_30d,
+            COUNT(*) FILTER (WHERE status = 'HUMAN_HANDOFF' AND created_at >= NOW() - INTERVAL '30 days') as handoffs_30d,
+            COUNT(*) FILTER (WHERE status = 'RESOLVED' AND updated_at >= NOW() - INTERVAL '30 days') as resolved_30d
         FROM sessions""",
         fetch_one=True
     )
 
     orders_stats = execute_query(
         """SELECT
-            COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) as orders_today,
-            COALESCE(SUM(estimated_price) FILTER (WHERE created_at::date = CURRENT_DATE), 0) as estimated_revenue_today
+            COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE)::int as orders_today,
+            COALESCE(SUM(estimated_price) FILTER (WHERE created_at::date = CURRENT_DATE), 0)::bigint as estimated_revenue_today
         FROM orders""",
         fetch_one=True
     )
+
+    messages_stats = execute_query(
+        """SELECT
+            COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) as messages_today,
+            COUNT(*) FILTER (WHERE sender = 'client' AND created_at::date = CURRENT_DATE) as client_messages_today,
+            COUNT(*) FILTER (WHERE sender = 'bot' AND created_at::date = CURRENT_DATE) as bot_messages_today,
+            COUNT(*) FILTER (WHERE sender = 'agent' AND created_at::date = CURRENT_DATE) as agent_messages_today
+        FROM messages""",
+        fetch_one=True
+    )
+
+    clients_stats = execute_query(
+        "SELECT COUNT(*) as total_clients FROM clients",
+        fetch_one=True
+    )
+
+    daily_metrics = execute_query(
+        """WITH days AS (
+            SELECT generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, INTERVAL '1 day')::date AS day
+        ),
+        session_counts AS (
+            SELECT created_at::date AS day,
+                COUNT(*) AS sessions,
+                COUNT(*) FILTER (WHERE status = 'HUMAN_HANDOFF') AS handoffs
+            FROM sessions
+            WHERE created_at >= CURRENT_DATE - INTERVAL '13 days'
+            GROUP BY created_at::date
+        ),
+        message_counts AS (
+            SELECT created_at::date AS day,
+                COUNT(*) AS messages
+            FROM messages
+            WHERE created_at >= CURRENT_DATE - INTERVAL '13 days'
+            GROUP BY created_at::date
+        ),
+        order_counts AS (
+            SELECT created_at::date AS day,
+                COUNT(*) AS orders,
+                COALESCE(SUM(estimated_price), 0) AS revenue
+            FROM orders
+            WHERE created_at >= CURRENT_DATE - INTERVAL '13 days'
+            GROUP BY created_at::date
+        )
+        SELECT
+            d.day::text AS day,
+            TO_CHAR(d.day, 'DD/MM') AS label,
+            COALESCE(sc.sessions, 0)::int AS sessions,
+            COALESCE(sc.handoffs, 0)::int AS handoffs,
+            COALESCE(mc.messages, 0)::int AS messages,
+            COALESCE(oc.orders, 0)::int AS orders,
+            COALESCE(oc.revenue, 0)::bigint AS revenue
+        FROM days d
+        LEFT JOIN session_counts sc ON sc.day = d.day
+        LEFT JOIN message_counts mc ON mc.day = d.day
+        LEFT JOIN order_counts oc ON oc.day = d.day
+        ORDER BY d.day""",
+        fetch_all=True
+    )
+
+    session_status = execute_query(
+        """SELECT status::text AS status, COUNT(*)::int AS sessions
+        FROM sessions
+        WHERE created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY status
+        ORDER BY sessions DESC""",
+        fetch_all=True
+    )
+
+    message_sources = execute_query(
+        """SELECT sender, COUNT(*)::int AS messages
+        FROM messages
+        WHERE created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY sender
+        ORDER BY messages DESC""",
+        fetch_all=True
+    )
+
+    order_types = execute_query(
+        """SELECT order_type::text AS order_type, COUNT(*)::int AS orders
+        FROM orders
+        WHERE created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY order_type
+        ORDER BY orders DESC""",
+        fetch_all=True
+    )
+
+    sessions_30d = int(stats.get("sessions_30d", 0)) if stats else 0
+    handoffs_30d = int(stats.get("handoffs_30d", 0)) if stats else 0
+    resolved_30d = int(stats.get("resolved_30d", 0)) if stats else 0
+    messages_today = int(messages_stats.get("messages_today", 0)) if messages_stats else 0
+    bot_messages_today = int(messages_stats.get("bot_messages_today", 0)) if messages_stats else 0
+    agent_messages_today = int(messages_stats.get("agent_messages_today", 0)) if messages_stats else 0
+    handled_today = bot_messages_today + agent_messages_today
 
     return {
         "sessions_today": stats.get("sessions_today", 0) if stats else 0,
         "pending_handoffs": stats.get("pending_handoffs", 0) if stats else 0,
         "resolved_today": stats.get("resolved_today", 0) if stats else 0,
+        "active_sessions": stats.get("active_sessions", 0) if stats else 0,
         "orders_today": orders_stats.get("orders_today", 0) if orders_stats else 0,
         "estimated_revenue_today": orders_stats.get("estimated_revenue_today", 0) if orders_stats else 0,
+        "messages_today": messages_today,
+        "client_messages_today": messages_stats.get("client_messages_today", 0) if messages_stats else 0,
+        "bot_messages_today": bot_messages_today,
+        "agent_messages_today": agent_messages_today,
+        "total_clients": clients_stats.get("total_clients", 0) if clients_stats else 0,
+        "handoff_rate": round((handoffs_30d / sessions_30d) * 100, 1) if sessions_30d else 0,
+        "resolution_rate": round((resolved_30d / sessions_30d) * 100, 1) if sessions_30d else 0,
+        "automation_rate": round((bot_messages_today / handled_today) * 100, 1) if handled_today else 0,
+        "daily_metrics": daily_metrics or [],
+        "session_status": session_status or [],
+        "message_sources": message_sources or [],
+        "order_types": order_types or [],
     }
 
 
