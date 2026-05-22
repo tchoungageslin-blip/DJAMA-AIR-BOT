@@ -34,7 +34,7 @@ class AuthService:
             "iat": int(time.time())
         }
         payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).decode().rstrip("=")
-        signature = hmac.new(
+        signature = hmac.HMAC(
             settings.JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256
         ).hexdigest()
         return f"{header}.{payload}.{signature}"
@@ -50,7 +50,7 @@ class AuthService:
             header, payload, signature = parts
 
             # Verify signature
-            expected_sig = hmac.new(
+            expected_sig = hmac.HMAC(
                 settings.JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256
             ).hexdigest()
 
