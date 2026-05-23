@@ -52,12 +52,21 @@ class DjamaAgent:
             session = SessionQueries.create(client["id"])
 
         # 4. Store incoming message
+        import base64
+        media_url_db = None
+        if media_data and media_type:
+            try:
+                base64_img = base64.b64encode(media_data).decode('utf-8')
+                media_url_db = f"data:{media_type};base64,{base64_img}"
+            except Exception:
+                pass
+
         MessageQueries.create(
             session_id=session["id"],
             client_id=client["id"],
             sender="client",
             content=message_text or "[media]",
-            media_url=None,
+            media_url=media_url_db,
             media_type=media_type
         )
 
@@ -92,11 +101,10 @@ class DjamaAgent:
         # 8. Check for manual handoff triggered by the LLM
         if "[ACTION: TRANSFERT]" in response:
             response = response.replace("[ACTION: TRANSFERT]", "").strip()
-            # Trigger handoff process, but use the LLM's polite response
-            return await self._trigger_handoff(
+            # This is a normal order completion, NOT a hard handoff
+            return await self._finalize_order(
                 client, session, phone_number,
-                "Transfert déclenché par le bot après qualification.",
-                handoff_message=response
+                response
             )
 
         # 9. Store bot response
@@ -225,6 +233,7 @@ class DjamaAgent:
                 "weight_kg": summary_data.get("weight_kg"),
                 "dimensions": summary_data.get("dimensions"),
                 "goods_nature": summary_data.get("goods_nature"),
+                "fragility": summary_data.get("fragility", "STANDARD"),
                 "shipping_mode": summary_data.get("shipping_mode"),
                 "is_sensitive": summary_data.get("is_sensitive", False),
                 "notes": summary_data.get("notes", reason)
@@ -280,6 +289,69 @@ class DjamaAgent:
         )
 
         return final_response
+
+    async def _finalize_order(self, client: Dict, session: Dict, phone_number: str, bot_response: str) -> str:
+        """Process a completed order qualification WITHOUT blocking the bot."""
+        from api.db.queries import OrderQueries
+
+        # 1. Generate structured JSON summary from conversation
+        summary_json_str = await self.generate_handoff_summary(session["id"])
+        summary_data = {}
+        
+        try:
+            clean_str = summary_json_str.replace("```json", "").replace("```", "").strip()
+            summary_data = json.loads(clean_str)
+            
+            # Create Order
+            order_data = {
+                "origin": summary_data.get("origin"),
+                "destination": summary_data.get("destination"),
+                "weight_kg": summary_data.get("weight_kg"),
+                "dimensions": summary_data.get("dimensions"),
+                "goods_nature": summary_data.get("goods_nature"),
+                "fragility": summary_data.get("fragility", "STANDARD"),
+                "shipping_mode": summary_data.get("shipping_mode"),
+                "is_sensitive": summary_data.get("is_sensitive", False),
+                "notes": summary_data.get("notes", "Commande finalisée")
+            }
+            order_type = summary_data.get("order_type", "FRET")
+            est_price_raw = summary_data.get("estimated_price")
+            est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
+            
+            OrderQueries.create(client["id"], order_type, order_data, est_price)
+            
+            # Update client name if found and missing
+            extracted_name = summary_data.get("client_name")
+            if extracted_name and str(extracted_name).lower() != "null" and not client.get("first_name"):
+                ClientQueries.update(client["id"], first_name=extracted_name)
+                
+        except Exception as e:
+            print(f"[ORDER] Error parsing summary or creating order: {e}")
+            summary_data = {"notes": "Erreur parsing json order"}
+
+        # We DO NOT set HUMAN_HANDOFF status here, we keep BOT_ACTIVE
+        # We DO NOT disable the bot in session_manager
+
+        # Send notification to agents that a new order is ready
+        await notification_service.notify_handoff(
+            client_phone=phone_number,
+            session_id=session["id"],
+            summary=f"Nouvelle commande créée: {summary_data.get('notes', '')}",
+            tags=["NOUVELLE_COMMANDE"]
+        )
+
+        # Store the bot response
+        MessageQueries.create(
+            session_id=session["id"],
+            client_id=client["id"],
+            sender="bot",
+            content=bot_response
+        )
+
+        # Update Redis history so context continues
+        session_manager.add_message_to_history(phone_number, "assistant", bot_response)
+
+        return bot_response
 
     async def generate_handoff_summary(self, session_id: str) -> str:
         """Generate a structured summary for handoff."""

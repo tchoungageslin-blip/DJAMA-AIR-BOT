@@ -278,12 +278,75 @@ async def _process_message(message: dict, value: dict) -> None:
         # Notify about the error
         error_msg = (
             "Désolé, je rencontre un problème technique. "
-            "Un conseiller va vous répondre rapidement. 🙏"
+            "Un conseiller va vous répondre rapidement."
         )
         try:
             await whatsapp_service.send_text_message(phone_number, error_msg)
         except Exception as send_err:
             print(f"[WEBHOOK SEND ERROR] Failed to send error message: {send_err}")
+
+
+@app.get("/api/cron/timeout-sessions")
+async def cron_timeout_sessions():
+    """
+    Cron endpoint (e.g. called every hour by Vercel Cron or external service)
+    Checks for sessions that are BOT_ACTIVE but haven't been updated in 5 hours.
+    It moves them to HUMAN_HANDOFF and sends a follow-up message to the client.
+    """
+    try:
+        from api.db.connection import execute_query
+        from api.db.queries import SessionQueries
+        
+        # Find sessions older than 5 hours that are still BOT_ACTIVE
+        query = """
+            SELECT s.id, s.client_id, c.phone_number 
+            FROM sessions s
+            JOIN clients c ON s.client_id = c.id
+            WHERE s.status = 'BOT_ACTIVE' 
+            AND s.updated_at < NOW() - INTERVAL '5 hours'
+        """
+        stale_sessions = execute_query(query, fetch_all=True) or []
+        
+        results = []
+        for session in stale_sessions:
+            phone = session["phone_number"]
+            sid = session["id"]
+            
+            # Update status
+            SessionQueries.update_status(sid, "HUMAN_HANDOFF", ai_summary="Timeout de 5h: Le client n'a pas terminé le processus.")
+            SessionQueries.add_tag(sid, "TIMEOUT_5H")
+            
+            # Disable bot
+            session_manager.disable_bot_for_session(phone)
+            
+            # Notify agent
+            await notification_service.notify_handoff(
+                client_phone=phone,
+                session_id=sid,
+                summary="Le client a été inactif pendant 5h. Handoff automatique.",
+                tags=["TIMEOUT_5H"]
+            )
+            
+            # Send message to client
+            timeout_msg = (
+                "Bonjour Mr/Mme,\n\n"
+                "Je remarque que notre processus est resté inachevé. "
+                "J'ai transmis votre dossier à un conseiller qui prendra le relais "
+                "pour répondre à vos questions et finaliser votre demande.\n"
+                "À très vite !"
+            )
+            try:
+                await whatsapp_service.send_text_message(phone, timeout_msg)
+            except Exception as e:
+                print(f"[CRON] Failed to send timeout msg to {phone}: {e}")
+                
+            results.append({"session_id": sid, "phone": phone, "status": "handed_off"})
+            
+        return {"status": "ok", "processed": len(results), "details": results}
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        return {"status": "error", "error": str(e), "traceback": error_detail}
 
 
 # ============================================
@@ -317,6 +380,38 @@ async def debug_test_message(request: Request):
             "type": type(e).__name__,
             "traceback": error_detail
         }
+
+
+@app.post("/api/debug/reset-bot")
+async def debug_reset_bot(request: Request):
+    """Debug endpoint to reset a session status to BOT_ACTIVE."""
+    body = await request.json()
+    phone = body.get("phone")
+    if not phone:
+        return {"status": "error", "error": "Phone required"}
+        
+    try:
+        from api.db.connection import execute_query
+        from api.db.queries import SessionQueries
+        
+        # 1. Update session status
+        execute_query(
+            "UPDATE sessions SET status = 'BOT_ACTIVE' WHERE id IN (SELECT s.id FROM sessions s JOIN clients c ON s.client_id = c.id WHERE c.phone_number = %s)",
+            (phone,), fetch_one=False
+        )
+        
+        # 2. Re-enable bot in session context
+        context = session_manager.get_context(phone)
+        if context:
+            context["bot_disabled"] = False
+            session_manager.set_context(phone, context)
+            
+        # We can also clear the whole context to force a completely fresh start (which might be safer after a handoff)
+        session_manager.clear_context(phone)
+        
+        return {"status": "ok", "message": f"Bot re-enabled for {phone}"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @app.get("/api/debug/system-check")
