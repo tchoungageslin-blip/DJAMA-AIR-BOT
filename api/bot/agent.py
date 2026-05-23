@@ -89,7 +89,17 @@ class DjamaAgent:
         context = self._build_context(client, session, phone_number, vision_data)
         response = await self._get_ai_response(phone_number, message_text, context)
 
-        # 8. Store bot response
+        # 8. Check for manual handoff triggered by the LLM
+        if "[ACTION: TRANSFERT]" in response:
+            response = response.replace("[ACTION: TRANSFERT]", "").strip()
+            # Trigger handoff process, but use the LLM's polite response
+            return await self._trigger_handoff(
+                client, session, phone_number,
+                "Transfert déclenché par le bot après qualification.",
+                handoff_message=response
+            )
+
+        # 9. Store bot response
         MessageQueries.create(
             session_id=session["id"],
             client_id=client["id"],
@@ -97,7 +107,7 @@ class DjamaAgent:
             content=response
         )
 
-        # 9. Update session context in Redis
+        # 10. Update session context in Redis
         session_manager.add_message_to_history(phone_number, "user", message_text or "[media envoyé]")
         session_manager.add_message_to_history(phone_number, "assistant", response)
 
@@ -194,36 +204,82 @@ class DjamaAgent:
             await client.close()
 
     async def _trigger_handoff(self, client: Dict, session: Dict,
-                               phone_number: str, reason: str, tags: list = None) -> str:
-        """Trigger human handoff for sensitive cases."""
-        # Update session status
+                               phone_number: str, reason: str, tags: list = None,
+                               handoff_message: str = None) -> str:
+        """Trigger human handoff for sensitive cases or completed qualification."""
+        from api.db.queries import OrderQueries
+
+        # 1. Generate structured JSON summary from conversation
+        summary_json_str = await self.generate_handoff_summary(session["id"])
+        summary_data = {}
+        
+        try:
+            # Parse JSON safely (sometimes LLM wraps in ```json)
+            clean_str = summary_json_str.replace("```json", "").replace("```", "").strip()
+            summary_data = json.loads(clean_str)
+            
+            # Create Order
+            order_data = {
+                "origin": summary_data.get("origin"),
+                "destination": summary_data.get("destination"),
+                "weight_kg": summary_data.get("weight_kg"),
+                "dimensions": summary_data.get("dimensions"),
+                "goods_nature": summary_data.get("goods_nature"),
+                "shipping_mode": summary_data.get("shipping_mode"),
+                "is_sensitive": summary_data.get("is_sensitive", False),
+                "notes": summary_data.get("notes", reason)
+            }
+            order_type = summary_data.get("order_type", "FRET")
+            est_price_raw = summary_data.get("estimated_price")
+            est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
+            
+            OrderQueries.create(client["id"], order_type, order_data, est_price)
+            
+            # Update client name if found and missing
+            extracted_name = summary_data.get("client_name")
+            if extracted_name and str(extracted_name).lower() != "null" and not client.get("first_name"):
+                ClientQueries.update(client["id"], first_name=extracted_name)
+                
+        except Exception as e:
+            print(f"[HANDOFF] Error parsing summary or creating order: {e}")
+            summary_data = {"notes": reason}
+
+        # 2. Update session status
         SessionQueries.update_status(
             session["id"], "HUMAN_HANDOFF",
-            ai_summary=reason
+            ai_summary=summary_data.get("notes", reason)
         )
 
-        # Add tags
+        # 3. Add tags
         if tags:
             for tag in tags:
                 SessionQueries.add_tag(session["id"], tag)
 
-        # Disable bot for this session
+        # 4. Disable bot for this session
         session_manager.disable_bot_for_session(phone_number)
 
-        # Send notifications
+        # 5. Send notifications
         await notification_service.notify_handoff(
             client_phone=phone_number,
             session_id=session["id"],
-            summary=reason,
+            summary=summary_data.get("notes", reason),
             tags=tags
         )
 
-        # Return handoff message to client
-        return (
-            "⚠️ Votre demande nécessite l'attention d'un conseiller spécialisé.\n\n"
+        # 6. Store the final handoff message from the bot in the DB
+        final_response = handoff_message or (
+            "Votre demande nécessite l'attention d'un conseiller spécialisé.\n\n"
             "Un membre de notre équipe va prendre le relais très rapidement. "
-            "Merci de patienter un instant. 🙏"
+            "Merci de patienter un instant."
         )
+        MessageQueries.create(
+            session_id=session["id"],
+            client_id=client["id"],
+            sender="bot",
+            content=final_response
+        )
+
+        return final_response
 
     async def generate_handoff_summary(self, session_id: str) -> str:
         """Generate a structured summary for handoff."""
