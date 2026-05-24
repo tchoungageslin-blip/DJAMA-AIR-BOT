@@ -102,6 +102,21 @@ export default function InboxPage() {
         body: JSON.stringify({ agent_id: "current" }),
       });
       fetchSessions();
+      setSelectedSession({ ...selectedSession, status: "HUMAN_ACTIVE" });
+    } catch {
+      // Silent fail
+    }
+  };
+
+  const releaseSession = async () => {
+    if (!selectedSession) return;
+    try {
+      await fetch(`/api/dashboard/sessions/${selectedSession.id}/release`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      fetchSessions();
+      setSelectedSession({ ...selectedSession, status: "BOT_ACTIVE" });
     } catch {
       // Silent fail
     }
@@ -227,6 +242,15 @@ export default function InboxPage() {
                     className="px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition"
                   >
                     Prendre en charge
+                  </button>
+                )}
+                {selectedSession.status === "HUMAN_ACTIVE" && (
+                  <button
+                    onClick={releaseSession}
+                    className="px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 transition flex items-center gap-1"
+                  >
+                    <Bot className="w-3 h-3" />
+                    Restituer à l'IA
                   </button>
                 )}
                 {getStatusBadge(selectedSession.status)}

@@ -164,11 +164,12 @@ class OrderQueries:
     def create(client_id: str, order_type: str, data: dict, estimated_price: int = None) -> Dict:
         """Create a new order."""
         import json
-        prefix = {"FRET": "FR", "BILLETTERIE": "BL", "PACK": "PK"}[order_type]
+        order_type_clean = str(order_type).upper().strip()
+        prefix = {"FRET": "FR", "BILLETTERIE": "BL", "PACK": "PK"}.get(order_type_clean, "CMD")
         # Generate order number
         count = execute_query(
             f"SELECT COUNT(*) as cnt FROM orders WHERE order_type = %s",
-            (order_type,),
+            (order_type_clean,),
             fetch_one=True
         )
         number = (count["cnt"] if count else 0) + 1001
@@ -178,7 +179,7 @@ class OrderQueries:
             """INSERT INTO orders (id, order_number, client_id, order_type, status, data, estimated_price, created_at, updated_at)
             VALUES (gen_random_uuid(), %s, %s, %s, 'NOUVEAU', %s::jsonb, %s, NOW(), NOW())
             RETURNING *""",
-            (order_number, client_id, order_type, json.dumps(data) if data else None, estimated_price),
+            (order_number, client_id, order_type_clean, json.dumps(data) if data else None, estimated_price),
             fetch_one=True
         )
 

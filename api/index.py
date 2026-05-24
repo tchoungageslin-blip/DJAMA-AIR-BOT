@@ -545,6 +545,8 @@ async def takeover_session(session_id: str, request: Request):
     """Agent takes over a session (silent takeover)."""
     body = await request.json()
     agent_id = body.get("agent_id")
+    if agent_id == "current":
+        agent_id = None
 
     from api.db.connection import execute_query
     session = execute_query(
@@ -560,13 +562,49 @@ async def takeover_session(session_id: str, request: Request):
     )
 
     # Update session
-    SessionQueries.update_status(session_id, "HUMAN_ACTIVE", agent_id=agent_id)
+    try:
+        from api.db.queries import SessionQueries
+        SessionQueries.update_status(session_id, "HUMAN_ACTIVE", agent_id=agent_id)
+    except Exception as e:
+        print(f"Error in takeover: {e}")
 
     # Disable bot in Redis
     if client:
         session_manager.disable_bot_for_session(client["phone_number"])
 
     return {"status": "ok", "session_status": "HUMAN_ACTIVE"}
+
+
+@app.post("/api/dashboard/sessions/{session_id}/release")
+async def release_session(session_id: str):
+    """Release a session back to the bot."""
+    from api.db.connection import execute_query
+    session = execute_query(
+        "SELECT * FROM sessions WHERE id = %s", (session_id,), fetch_one=True
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    client = execute_query(
+        "SELECT phone_number FROM clients WHERE id = %s",
+        (session["client_id"],), fetch_one=True
+    )
+
+    try:
+        from api.db.queries import SessionQueries
+        SessionQueries.update_status(session_id, "BOT_ACTIVE", agent_id=None)
+    except Exception as e:
+        print(f"Error in release: {e}")
+
+    if client:
+        phone = client["phone_number"]
+        context = session_manager.get_context(phone)
+        if context:
+            context["bot_disabled"] = False
+            session_manager.set_context(phone, context)
+        session_manager.clear_context(phone)
+
+    return {"status": "ok", "session_status": "BOT_ACTIVE"}
 
 
 @app.post("/api/dashboard/sessions/{session_id}/reply")
