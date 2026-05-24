@@ -238,7 +238,8 @@ class DjamaAgent:
                 "is_sensitive": summary_data.get("is_sensitive", False),
                 "notes": summary_data.get("notes", reason)
             }
-            order_type = summary_data.get("order_type", "FRET")
+            order_type = summary_data.get("order_type", "AUTRE")
+            print(f"[HANDOFF] LLM returned order_type={order_type}")
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
             
@@ -251,7 +252,17 @@ class DjamaAgent:
                 
         except Exception as e:
             print(f"[HANDOFF] Error parsing summary or creating order: {e}")
-            summary_data = {"notes": reason}
+            print(f"[HANDOFF] Raw LLM output was: {summary_json_str}")
+            summary_data = {"notes": f"{reason} | Erreur JSON: {summary_json_str}"}
+            try:
+                OrderQueries.create(
+                    client["id"], 
+                    "AUTRE", 
+                    {"notes": summary_data["notes"], "error": str(e)}, 
+                    None
+                )
+            except Exception as fallback_e:
+                print(f"[HANDOFF] CRITICAL: Fallback order creation failed: {fallback_e}")
 
         # 2. Update session status
         SessionQueries.update_status(
@@ -314,7 +325,8 @@ class DjamaAgent:
                 "is_sensitive": summary_data.get("is_sensitive", False),
                 "notes": summary_data.get("notes", "Commande finalisée")
             }
-            order_type = summary_data.get("order_type", "FRET")
+            order_type = summary_data.get("order_type", "AUTRE")
+            print(f"[ORDER] LLM returned order_type={order_type} for session {session['id']}")
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
             
@@ -327,10 +339,25 @@ class DjamaAgent:
                 
         except Exception as e:
             print(f"[ORDER] Error parsing summary or creating order: {e}")
-            summary_data = {"notes": "Erreur parsing json order"}
+            print(f"[ORDER] Raw LLM output was: {summary_json_str}")
+            summary_data = {"notes": f"Erreur système ou IA. Détails bruts: {summary_json_str}"}
+            try:
+                # Force fallback order creation to avoid silent drops
+                OrderQueries.create(
+                    client["id"], 
+                    "AUTRE", 
+                    {"notes": summary_data["notes"], "error": str(e)}, 
+                    None
+                )
+            except Exception as fallback_e:
+                print(f"[ORDER] CRITICAL: Fallback order creation failed: {fallback_e}")
 
-        # We DO NOT set HUMAN_HANDOFF status here, we keep BOT_ACTIVE
-        # We DO NOT disable the bot in session_manager
+        # Close the current session so next message starts fresh
+        # This prevents mixing old conversation context with new requests
+        SessionQueries.update_status(session["id"], "RESOLVED", ai_summary=summary_data.get("notes", "Commande finalisée"))
+
+        # Clear Redis conversation history so next session starts clean
+        session_manager.clear_context(phone_number)
 
         # Send notification to agents that a new order is ready
         await notification_service.notify_handoff(
@@ -356,9 +383,11 @@ class DjamaAgent:
     async def generate_handoff_summary(self, session_id: str) -> str:
         """Generate a structured summary for handoff."""
         messages = MessageQueries.get_session_messages(session_id)
+        # Use only the last 15 messages to focus on the most recent request
+        recent_messages = messages[-15:] if len(messages) > 15 else messages
         conversation = "\n".join([
             f"{'Client' if m['sender'] == 'client' else 'Bot'}: {m['content']}"
-            for m in messages
+            for m in recent_messages
         ])
 
         client = self._create_openai_client()

@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from typing import Optional
+from pydantic import BaseModel
 
 from api.config import settings
 from api.bot.agent import djama_agent
@@ -656,6 +657,200 @@ async def toggle_bot(request: Request):
     return {"bot_enabled": enabled}
 
 
+@app.post("/api/debug/test-billetterie")
+async def test_billetterie_flow():
+    """End-to-end test: simulate a billetterie conversation and verify order creation."""
+    from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
+    from api.db.connection import execute_query
+    import json as _json
+
+    results = {"steps": []}
+    session_id = None
+    client_id = None
+
+    try:
+        # 1. Get or create test client
+        client = ClientQueries.find_by_phone("TEST_BILLETTERIE_BOT")
+        if not client:
+            client = ClientQueries.create("TEST_BILLETTERIE_BOT", first_name="Test Bot")
+        client_id = client["id"]
+        results["steps"].append({"step": "client", "id": client_id})
+
+        # 2. Create a fresh session
+        session = SessionQueries.create(client_id, status="BOT_ACTIVE", intent="BILLETTERIE")
+        session_id = session["id"]
+        results["steps"].append({"step": "session", "id": session_id, "status": session["status"]})
+
+        # 3. Insert realistic billetterie conversation messages
+        msgs = [
+            ("client", "Bonjour, je voudrais réserver un billet d'avion"),
+            ("bot", "Bonjour ! Avec plaisir, je vais vous aider pour votre réservation. Quel est votre trajet ? (ville de départ et destination)"),
+            ("client", "Douala vers Paris"),
+            ("bot", "Parfait ! Quelles sont vos dates de voyage souhaitées ?"),
+            ("client", "Départ le 15 juillet, retour le 30 juillet"),
+            ("bot", "C'est noté. Combien de passagers voyageront ?"),
+            ("client", "2 passagers adultes"),
+            ("bot", "En quelle classe souhaitez-vous voyager ? (Économique, Affaires, Première)"),
+            ("client", "Classe économique"),
+            ("bot", "Pour finaliser votre dossier, pourrais-je avoir votre nom complet s'il vous plaît ?"),
+            ("client", "Jean-Pierre Kamga"),
+            ("bot", "Merci M. Kamga. Votre commande a bien été prise en compte. Nous vous recontacterons très prochainement."),
+        ]
+        for sender, content in msgs:
+            MessageQueries.create(session_id=session_id, client_id=client_id, sender=sender, content=content)
+        results["steps"].append({"step": "messages", "count": len(msgs)})
+
+        # 4. Call generate_handoff_summary (this calls the LLM)
+        summary_str = await djama_agent.generate_handoff_summary(session_id)
+        clean = summary_str.replace("```json", "").replace("```", "").strip()
+        summary = _json.loads(clean)
+        results["steps"].append({
+            "step": "handoff_summary",
+            "raw": summary_str[:500],
+            "parsed_order_type": summary.get("order_type"),
+            "parsed_client_name": summary.get("client_name"),
+            "parsed_origin": summary.get("origin"),
+            "parsed_destination": summary.get("destination"),
+            "parsed_shipping_mode": summary.get("shipping_mode"),
+        })
+
+        # 5. Create order using the same logic as _finalize_order
+        order_type = summary.get("order_type", "AUTRE")
+        order_data = {
+            "origin": summary.get("origin"),
+            "destination": summary.get("destination"),
+            "weight_kg": summary.get("weight_kg"),
+            "dimensions": summary.get("dimensions"),
+            "goods_nature": summary.get("goods_nature"),
+            "shipping_mode": summary.get("shipping_mode"),
+            "notes": summary.get("notes", "Test billetterie"),
+        }
+        est_price_raw = summary.get("estimated_price")
+        est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
+
+        order = OrderQueries.create(client_id, order_type, order_data, est_price)
+        results["steps"].append({
+            "step": "order_created",
+            "order_number": order.get("order_number"),
+            "order_type": order.get("order_type"),
+            "status": order.get("status"),
+        })
+
+        # 6. Verify the order type is BILLETTERIE
+        is_correct = order.get("order_type") == "BILLETTERIE"
+        results["test_passed"] = is_correct
+        results["verdict"] = "BILLETTERIE correctly classified!" if is_correct else f"Got {order.get('order_type')} instead of BILLETTERIE"
+
+    except Exception as e:
+        import traceback
+        results["steps"].append({"step": "error", "error": str(e), "traceback": traceback.format_exc()})
+        results["test_passed"] = False
+        results["verdict"] = f"Error: {e}"
+
+    # 7. Cleanup
+    try:
+        if session_id:
+            execute_query("DELETE FROM messages WHERE session_id = %s", (session_id,))
+            execute_query("DELETE FROM sessions WHERE id = %s", (session_id,))
+        if client_id:
+            execute_query("DELETE FROM orders WHERE client_id = %s", (client_id,))
+            execute_query("DELETE FROM clients WHERE id = %s", (client_id,))
+        results["cleanup"] = "done"
+    except Exception as ce:
+        results["cleanup"] = f"error: {ce}"
+
+    return results
+
+
+@app.post("/api/debug/run-sql")
+async def debug_run_sql(request: Request):
+    body = await request.json()
+    sql = body.get("sql")
+    from api.db.connection import execute_query, execute_ddl
+    try:
+        upper = sql.strip().upper()
+        if upper.startswith(("ALTER ", "CREATE ", "DROP ")):
+            execute_ddl(sql)
+            return {"status": "ok", "message": "DDL executed successfully"}
+        else:
+            res = execute_query(sql, fetch_all=True)
+            return {"status": "ok", "result": res}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/migrate")
+async def run_migration():
+    """One-shot migration: convert order_type ENUM to TEXT + add is_read column."""
+    from api.db.connection import execute_ddl
+    results = []
+    
+    # Step 1: Convert order_type from ENUM to TEXT
+    try:
+        execute_ddl("ALTER TABLE orders ALTER COLUMN order_type TYPE TEXT;")
+        results.append("order_type converted to TEXT")
+    except Exception as e:
+        results.append(f"order_type conversion: {e}")
+    
+    # Step 2: Add is_read column
+    try:
+        execute_ddl("ALTER TABLE orders ADD COLUMN is_read BOOLEAN DEFAULT false;")
+        results.append("is_read column added")
+    except Exception as e:
+        results.append(f"is_read column: {e}")
+    
+    # Step 3: Also convert session_intent ENUM to TEXT for future flexibility
+    try:
+        execute_ddl("ALTER TABLE sessions ALTER COLUMN session_intent TYPE TEXT;")
+        results.append("session_intent converted to TEXT")
+    except Exception as e:
+        results.append(f"session_intent conversion: {e}")
+    
+    return {"status": "ok", "results": results}
+
+@app.get("/api/dashboard/orders/badges")
+async def get_order_badges():
+    """Get count of unread (is_read=false) orders grouped by type."""
+    from api.db.connection import execute_query
+    try:
+        # Try with is_read column first
+        res = execute_query(
+            "SELECT order_type, COUNT(*) as count FROM orders WHERE is_read = false GROUP BY order_type",
+            fetch_all=True
+        )
+    except Exception:
+        # Fallback if is_read column doesn't exist yet: count all NOUVEAU orders
+        try:
+            res = execute_query(
+                "SELECT order_type, COUNT(*) as count FROM orders WHERE status = 'NOUVEAU' GROUP BY order_type",
+                fetch_all=True
+            )
+        except Exception:
+            return {"status": "ok", "badges": {}}
+    badges = {r["order_type"]: r["count"] for r in (res or [])}
+    total = sum(badges.values())
+    badges["TOTAL"] = total
+    return {"status": "ok", "badges": badges}
+
+@app.post("/api/dashboard/orders/{order_id}/read")
+async def mark_order_read(order_id: str):
+    """Mark an order as read."""
+    from api.db.connection import execute_query
+    execute_query("UPDATE orders SET is_read = true WHERE id = %s", (order_id,), fetch_one=False)
+    return {"status": "ok"}
+
+class OrderStatusUpdate(BaseModel):
+    status: str
+
+@app.post("/api/dashboard/orders/{order_id}/status")
+async def update_order_status(order_id: str, payload: OrderStatusUpdate):
+    """Update the status of an order."""
+    from api.db.queries import OrderQueries
+    updated = OrderQueries.update_status(order_id, payload.status)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {"status": "ok", "order_status": payload.status}
+
 @app.get("/api/dashboard/orders")
 async def get_orders(order_type: Optional[str] = None, status: Optional[str] = None):
     """Get orders for the order management board."""
@@ -665,20 +860,38 @@ async def get_orders(order_type: Optional[str] = None, status: Optional[str] = N
     params = []
 
     if order_type:
-        conditions.append("o.order_type = %s")
-        params.append(order_type)
+        # Map new dashboard tab keys to also include legacy ENUM values
+        type_map = {
+            "FRET_AERIEN": ["FRET_AERIEN", "FRET"],
+            "FRET_MARITIME": ["FRET_MARITIME"],
+        }
+        types_to_match = type_map.get(order_type, [order_type])
+        placeholders = ", ".join(["%s"] * len(types_to_match))
+        conditions.append(f"o.order_type IN ({placeholders})")
+        params.extend(types_to_match)
     if status:
         conditions.append("o.status = %s")
         params.append(status)
 
-    orders = execute_query(
-        f"""SELECT o.*, c.phone_number, c.first_name, c.last_name
-        FROM orders o JOIN clients c ON o.client_id = c.id
-        WHERE {' AND '.join(conditions)}
-        ORDER BY o.created_at DESC LIMIT 50""",
-        tuple(params) if params else None,
-        fetch_all=True
-    )
+    try:
+        orders = execute_query(
+            f"""SELECT o.*, c.phone_number, c.first_name, c.last_name
+            FROM orders o JOIN clients c ON o.client_id = c.id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY o.is_read ASC, o.created_at DESC LIMIT 50""",
+            tuple(params) if params else None,
+            fetch_all=True
+        )
+    except Exception:
+        # Fallback if is_read column doesn't exist yet
+        orders = execute_query(
+            f"""SELECT o.*, c.phone_number, c.first_name, c.last_name
+            FROM orders o JOIN clients c ON o.client_id = c.id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY o.created_at DESC LIMIT 50""",
+            tuple(params) if params else None,
+            fetch_all=True
+        )
 
     return {"orders": orders or []}
 

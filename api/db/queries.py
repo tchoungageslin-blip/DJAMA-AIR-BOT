@@ -165,23 +165,66 @@ class OrderQueries:
         """Create a new order."""
         import json
         order_type_clean = str(order_type).upper().strip()
-        prefix = {"FRET": "FR", "BILLETTERIE": "BL", "PACK": "PK"}.get(order_type_clean, "CMD")
-        # Generate order number
-        count = execute_query(
-            f"SELECT COUNT(*) as cnt FROM orders WHERE order_type = %s",
-            (order_type_clean,),
-            fetch_one=True
-        )
-        number = (count["cnt"] if count else 0) + 1001
-        order_number = f"{prefix}-{number}"
+        prefix_map = {
+            "FRET_AERIEN": "FA",
+            "FRET_MARITIME": "FM",
+            "FRET": "FR",
+            "BILLETTERIE": "BL",
+            "PACK": "PK",
+            "SOURCING": "SC",
+            "PAIEMENT": "PF",
+            "INSPECTION": "IC",
+            "AUTRE": "AU"
+        }
+        prefix = prefix_map.get(order_type_clean, "CMD")
+        
+        # If the LLM still returns "FRET" but specifies shipping mode, we can auto-fix it
+        # ONLY convert if shipping_mode is explicitly set (not null/empty)
+        if order_type_clean == "FRET" and data:
+            sm = str(data.get("shipping_mode") or "").upper().strip()
+            if sm and sm != "NULL":
+                if "MARITIME" in sm:
+                    order_type_clean = "FRET_MARITIME"
+                    prefix = "FM"
+                elif "AERIEN" in sm:
+                    order_type_clean = "FRET_AERIEN"
+                    prefix = "FA"
 
-        return execute_query(
-            """INSERT INTO orders (id, order_number, client_id, order_type, status, data, estimated_price, created_at, updated_at)
-            VALUES (gen_random_uuid(), %s, %s, %s, 'NOUVEAU', %s::jsonb, %s, NOW(), NOW())
-            RETURNING *""",
-            (order_number, client_id, order_type_clean, json.dumps(data) if data else None, estimated_price),
-            fetch_one=True
-        )
+        # Map new types to legacy ENUM values as fallback
+        legacy_map = {
+            "FRET_AERIEN": "FRET", "FRET_MARITIME": "FRET",
+            "SOURCING": "FRET", "PAIEMENT": "FRET",
+            "INSPECTION": "FRET", "AUTRE": "FRET",
+        }
+
+        def _do_insert(ot: str, pfx: str):
+            count = execute_query(
+                "SELECT COUNT(*) as cnt FROM orders WHERE order_type = %s",
+                (ot,), fetch_one=True
+            )
+            number = (count["cnt"] if count else 0) + 1001
+            on = f"{pfx}-{number}"
+            # Store the original intended type in data for traceability
+            if data and ot != order_type_clean:
+                data["_original_order_type"] = order_type_clean
+            return execute_query(
+                """INSERT INTO orders (id, order_number, client_id, order_type, status, data, estimated_price, created_at, updated_at)
+                VALUES (gen_random_uuid(), %s, %s, %s, 'NOUVEAU', %s::jsonb, %s, NOW(), NOW())
+                RETURNING *""",
+                (on, client_id, ot, json.dumps(data) if data else None, estimated_price),
+                fetch_one=True
+            )
+
+        try:
+            return _do_insert(order_type_clean, prefix)
+        except Exception as e:
+            # If ENUM rejects the value, fall back to legacy type
+            legacy_type = legacy_map.get(order_type_clean)
+            if legacy_type:
+                print(f"[ORDER] Retrying with legacy type {legacy_type} (original: {order_type_clean}): {e}")
+                legacy_prefix = prefix_map.get(legacy_type, "CMD")
+                return _do_insert(legacy_type, legacy_prefix)
+            raise
 
     @staticmethod
     def update_status(order_id: str, status: str, **kwargs) -> Optional[Dict]:

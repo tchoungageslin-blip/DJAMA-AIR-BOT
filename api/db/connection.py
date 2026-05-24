@@ -29,3 +29,15 @@ def execute_query(query: str, params: tuple = None, fetch_one: bool = False, fet
             if fetch_all:
                 return cur.fetchall()
             return None
+
+
+def execute_ddl(statement: str):
+    """Execute a DDL statement (ALTER, CREATE, DROP) with autocommit=True.
+    PostgreSQL requires autocommit for certain DDL like ALTER TYPE ADD VALUE."""
+    conn = psycopg2.connect(settings.DATABASE_URL)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(statement)
+    finally:
+        conn.close()
