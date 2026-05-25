@@ -227,6 +227,17 @@ class OrderQueries:
             raise
 
     @staticmethod
+    def get_client_orders(client_id: str, limit: int = 10) -> List[Dict]:
+        """Get recent orders for a client (for memory/context building)."""
+        return execute_query(
+            """SELECT order_number, order_type, status, data, estimated_price, created_at
+            FROM orders WHERE client_id = %s
+            ORDER BY created_at DESC LIMIT %s""",
+            (client_id, limit),
+            fetch_all=True
+        ) or []
+
+    @staticmethod
     def update_status(order_id: str, status: str, **kwargs) -> Optional[Dict]:
         """Update order status."""
         set_clauses = ["status = %s", "updated_at = NOW()"]

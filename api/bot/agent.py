@@ -107,7 +107,11 @@ class DjamaAgent:
                 response
             )
 
-        # 9. Store bot response
+        # 9. Proactive name persistence: save client name to DB as soon as bot uses it
+        if not client.get("first_name"):
+            self._try_extract_and_save_name(client, response, message_text)
+
+        # 10. Store bot response
         MessageQueries.create(
             session_id=session["id"],
             client_id=client["id"],
@@ -115,7 +119,7 @@ class DjamaAgent:
             content=response
         )
 
-        # 10. Update session context in Redis
+        # 11. Update session context in Redis
         session_manager.add_message_to_history(phone_number, "user", message_text or "[media envoyé]")
         session_manager.add_message_to_history(phone_number, "assistant", response)
 
@@ -129,6 +133,43 @@ class DjamaAgent:
         except Exception as e:
             return None
 
+    def _try_extract_and_save_name(self, client: Dict, bot_response: str, user_message: str) -> None:
+        """Try to extract client name from conversation and persist to DB.
+        Detects patterns like 'M. Kamga', 'Mme Dupont', or direct name mentions."""
+        import re
+        try:
+            # Pattern 1: Bot addresses client by name in response (most reliable)
+            patterns = [
+                r"(?:Bonjour|Ravi|Content|Merci)\s+(?:M\.|Mme|Mr|Mrs|Monsieur|Madame)?\s*([A-ZÀ-Ü][a-zà-ü]+(?:[- ][A-ZÀ-Ü][a-zà-ü]+)*)",
+                r"(?:M\.|Mme|Mr|Monsieur|Madame)\s+([A-ZÀ-Ü][a-zà-ü]+(?:[- ][A-ZÀ-Ü][a-zà-ü]+)*)",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, bot_response)
+                if match:
+                    name = match.group(1).strip()
+                    # Skip generic words that aren't names
+                    skip = {"Air", "Logistics", "Djama", "Bonjour", "Bienvenue", "WhatsApp"}
+                    if name and name not in skip and len(name) > 1:
+                        ClientQueries.update(client["id"], first_name=name)
+                        print(f"[MEMORY] Saved client name: {name} (from bot response)")
+                        return
+
+            # Pattern 2: User introduced themselves "je suis X" or "je m'appelle X"
+            if user_message:
+                intro_patterns = [
+                    r"(?:je suis|je m'appelle|mon nom est|c'est|moi c'est)\s+([A-ZÀ-Ü][a-zà-ü]+(?:[- ][A-ZÀ-Ü][a-zà-ü]+)*)",
+                ]
+                for pattern in intro_patterns:
+                    match = re.search(pattern, user_message, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
+                        if name and len(name) > 1:
+                            ClientQueries.update(client["id"], first_name=name)
+                            print(f"[MEMORY] Saved client name: {name} (from user message)")
+                            return
+        except Exception as e:
+            print(f"[MEMORY] Name extraction error: {e}")
+
     def _check_sensitive_text(self, text: str) -> Tuple[bool, Optional[str]]:
         """Check if message text contains sensitive keywords."""
         text_lower = text.lower()
@@ -139,32 +180,61 @@ class DjamaAgent:
 
     def _build_context(self, client: Dict, session: Dict, phone_number: str,
                        vision_data: Optional[Dict] = None) -> str:
-        """Build additional context for the AI prompt."""
+        """Build additional context for the AI prompt including persistent client memory."""
+        from api.db.queries import OrderQueries as _OQ
         context_parts = []
 
-        # Client info
-        if client.get("first_name"):
-            context_parts.append(f"Client: {client.get('first_name', '')} {client.get('last_name', '')}")
-            context_parts.append(f"Type: {client.get('client_type', 'NEW')}")
+        # === PERSISTENT MEMORY (from PostgreSQL - survives across sessions) ===
+        client_name = client.get("first_name") or ""
+        client_last = client.get("last_name") or ""
+        full_name = f"{client_name} {client_last}".strip()
+
+        if full_name:
+            context_parts.append(f"[MEMOIRE] Nom du client: {full_name}")
+            context_parts.append(f"[MEMOIRE] Type client: {client.get('client_type', 'NEW')}")
+        else:
+            context_parts.append("[MEMOIRE] Client inconnu (nom pas encore collecte)")
+
+        # Order history - critical for client valorization
+        try:
+            past_orders = _OQ.get_client_orders(client["id"], limit=5)
+            if past_orders:
+                context_parts.append(f"[MEMOIRE] Client fidele avec {len(past_orders)} commande(s) recente(s):")
+                for o in past_orders:
+                    data = o.get("data") or {}
+                    if isinstance(data, str):
+                        data = json.loads(data)
+                    origin = data.get("origin", "?")
+                    dest = data.get("destination", "?")
+                    notes = data.get("notes", "")
+                    date_str = str(o.get("created_at", ""))[:10]
+                    context_parts.append(
+                        f"  - {o['order_number']} ({o['order_type']}) {origin} -> {dest} | {o['status']} | {date_str}"
+                    )
+                    if notes:
+                        context_parts.append(f"    Details: {notes[:100]}")
+            else:
+                context_parts.append("[MEMOIRE] Nouveau client, aucune commande precedente")
+        except Exception:
+            pass
 
         # Preferences
         prefs = ClientQueries.get_preferences(client["id"])
         if prefs:
             if prefs.get("frequent_destinations"):
-                context_parts.append(f"Destinations fréquentes: {', '.join(prefs['frequent_destinations'])}")
+                context_parts.append(f"[MEMOIRE] Destinations frequentes: {', '.join(prefs['frequent_destinations'])}")
             if prefs.get("frequent_goods"):
-                context_parts.append(f"Marchandises fréquentes: {', '.join(prefs['frequent_goods'])}")
+                context_parts.append(f"[MEMOIRE] Marchandises frequentes: {', '.join(prefs['frequent_goods'])}")
 
-        # Session state from Redis
+        # === SESSION CONTEXT (from Redis - current conversation only) ===
         redis_context = session_manager.get_context(phone_number)
         if redis_context:
             if redis_context.get("current_lead"):
-                context_parts.append(f"Données en cours: {json.dumps(redis_context['current_lead'], ensure_ascii=False)}")
+                context_parts.append(f"[SESSION] Donnees en cours: {json.dumps(redis_context['current_lead'], ensure_ascii=False)}")
 
         # Vision data
         if vision_data:
-            context_parts.append(f"Données extraites de l'image: {json.dumps(vision_data, ensure_ascii=False)}")
-            # Pre-calculate price if we have enough data
+            context_parts.append(f"[SESSION] Donnees extraites de l'image: {json.dumps(vision_data, ensure_ascii=False)}")
             if vision_data.get("weight_kg"):
                 dims = vision_data.get("dimensions", {})
                 estimate = pricing_engine.estimate_aerien(
@@ -174,7 +244,7 @@ class DjamaAgent:
                     width_cm=dims.get("width_cm"),
                     height_cm=dims.get("height_cm")
                 )
-                context_parts.append(f"Estimation calculée: {json.dumps(estimate, ensure_ascii=False)}")
+                context_parts.append(f"[SESSION] Estimation calculee: {json.dumps(estimate, ensure_ascii=False)}")
 
         return "\n".join(context_parts)
 

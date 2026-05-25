@@ -1,7 +1,7 @@
 import json
 import base64
 from typing import Optional, Dict
-from openai import OpenAI
+from openai import AsyncOpenAI
 from api.config import settings
 from api.bot.prompts import VISION_PROMPT
 
@@ -10,19 +10,19 @@ class VisionProcessor:
     """Processes images and PDFs using GPT-4o Vision."""
 
     def __init__(self):
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             api_key=settings.OPENROUTER_API_KEY,
             base_url=settings.OPENROUTER_BASE_URL
         )
 
-    def analyze_image(self, image_data: bytes, media_type: str = "image/jpeg") -> Dict:
+    async def analyze_image(self, image_data: bytes, media_type: str = "image/jpeg") -> Dict:
         """
         Analyze an image (photo of package, label, screenshot).
         Returns extracted data (dimensions, weight, nature, hazards).
         """
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
-        response = self.client.chat.completions.create(
+        response = await self.client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=[
                 {
