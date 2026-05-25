@@ -2,7 +2,7 @@ import httpx
 import asyncio
 
 async def test():
-    token = "vx_live_816099ed0c802459f432e1b0fb184f5005d8dd06160ed52d7c956e97b753bb44"
+    token = "vx_live_d0be8d41c344a79f11b2ba8ead2eb00d6e5b94932e00f7a588115ed62f43a603"
     payload = {"to": "237670550135", "type": "text", "text": {"body": "Test webhook error check"}}
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
