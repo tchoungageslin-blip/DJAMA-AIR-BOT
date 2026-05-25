@@ -8,6 +8,10 @@ class Settings:
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o")
 
+    # Audio Transcription (Groq is recommended for fast/free Whisper)
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+
     # Database
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 

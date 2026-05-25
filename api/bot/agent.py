@@ -128,9 +128,10 @@ class DjamaAgent:
     async def _process_media(self, media_data: bytes, media_type: str) -> Optional[Dict]:
         """Process incoming media (image/document) with vision AI."""
         try:
-            result = vision_processor.analyze_image(media_data, media_type)
+            result = await vision_processor.analyze_image(media_data, media_type)
             return result
         except Exception as e:
+            print(f"[VISION ERROR] {e}")
             return None
 
     def _try_extract_and_save_name(self, client: Dict, bot_response: str, user_message: str) -> None:

@@ -236,18 +236,31 @@ async def _process_message(message: dict, value: dict) -> None:
             text = interactive.get("button_reply", {}).get("title", "")
         elif interactive.get("type") == "list_reply":
             text = interactive.get("list_reply", {}).get("title", "")
-    elif message_type in ["image", "document"]:
-        # Handle media
+    elif message_type in ["image", "document", "audio"]:
+        # Handle media (images, documents, voice notes)
         media_info = message.get(message_type, {})
         media_id = media_info.get("id")
         caption = media_info.get("caption", "")
-        text = caption
+        if message_type != "audio":
+            text = caption
 
         if media_id:
             try:
                 media_data = await whatsapp_service.download_media(media_id)
-                media_type = media_info.get("mime_type", "image/jpeg")
-            except Exception:
+                media_type = media_info.get("mime_type", "image/jpeg" if message_type == "image" else "audio/ogg")
+                
+                # If it's an audio message, transcribe it immediately
+                if message_type == "audio" and media_data:
+                    from api.bot.audio import audio_processor
+                    transcription = await audio_processor.transcribe_audio(media_data, media_type)
+                    if transcription:
+                        print(f"[AUDIO] Transcribed: {transcription}")
+                        text = transcription
+                        # We don't need to pass the raw audio data to the AI agent anymore, just the text
+                        media_data = None
+                        media_type = None
+            except Exception as e:
+                print(f"[MEDIA ERROR] Failed to download or process media: {e}")
                 media_data = None
 
     # Skip empty messages
@@ -762,7 +775,76 @@ async def test_billetterie_flow():
     return results
 
 
-@app.post("/api/debug/run-sql")
+@app.post("/api/debug/test-vision")
+async def test_vision_flow():
+    """End-to-end test: simulate a photo upload and verify the bot doesn't ask for weight if it's in the photo."""
+    from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
+    from api.db.connection import execute_query
+    import json as _json
+
+    results = {"steps": []}
+    session_id = None
+    client_id = None
+
+    try:
+        # 1. Get or create test client
+        client = ClientQueries.find_by_phone("TEST_VISION_BOT")
+        if not client:
+            client = ClientQueries.create("TEST_VISION_BOT", first_name="Test Vision")
+        client_id = client["id"]
+        
+        # 2. Create session
+        session = SessionQueries.create(client_id, status="BOT_ACTIVE", intent="FRET")
+        session_id = session["id"]
+
+        # 3. Simulate vision data extraction (as if a photo with weight=20kg and dims=50x50x50 was uploaded)
+        vision_data = {
+            "dimensions": {"length_cm": 50, "width_cm": 50, "height_cm": 50},
+            "weight_kg": 20,
+            "goods_nature": "Vêtements",
+            "quantity": 1,
+            "hazard_icons": [],
+            "is_sensitive": False,
+            "confidence": "high"
+        }
+
+        # 4. First interaction: user sends photo and asks for price
+        MessageQueries.create(session_id=session_id, client_id=client_id, sender="client", content="Voici la photo de mon colis pour Douala. Quel est le prix ?")
+        
+        # 5. Build context including vision data
+        context = djama_agent._build_context(client, session, "TEST_VISION_BOT", vision_data=vision_data)
+        results["steps"].append({"step": "context", "content": context})
+        
+        # 6. Ask AI for response
+        bot_response = await djama_agent._get_ai_response("TEST_VISION_BOT", "Voici la photo de mon colis pour Douala. Quel est le prix ?", context)
+        results["steps"].append({"step": "bot_response", "content": bot_response})
+        
+        # 7. Verification: The bot should NOT ask for weight or dimensions, but SHOULD ask for Origin (since destination is Douala)
+        bot_lower = bot_response.lower()
+        asked_weight = "poids" in bot_lower
+        asked_dims = "dimension" in bot_lower
+        asked_origin = "départ" in bot_lower or "origine" in bot_lower or "où" in bot_lower
+        
+        results["test_passed"] = (not asked_weight) and (not asked_dims) and asked_origin
+        results["verdict"] = f"Weight asked: {asked_weight}, Dims asked: {asked_dims}, Origin asked: {asked_origin}"
+
+    except Exception as e:
+        import traceback
+        results["steps"].append({"step": "error", "error": str(e), "traceback": traceback.format_exc()})
+        results["test_passed"] = False
+
+    # 8. Cleanup
+    try:
+        if session_id:
+            execute_query("DELETE FROM messages WHERE session_id = %s", (session_id,))
+            execute_query("DELETE FROM sessions WHERE id = %s", (session_id,))
+        if client_id:
+            execute_query("DELETE FROM orders WHERE client_id = %s", (client_id,))
+            execute_query("DELETE FROM clients WHERE id = %s", (client_id,))
+    except Exception:
+        pass
+
+    return results
 async def debug_run_sql(request: Request):
     body = await request.json()
     sql = body.get("sql")

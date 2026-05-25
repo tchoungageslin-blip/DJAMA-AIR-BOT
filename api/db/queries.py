@@ -266,10 +266,12 @@ class MessageQueries:
         )
 
     @staticmethod
-    def get_session_messages(session_id: str, limit: int = 50) -> List[Dict]:
-        """Get messages for a session."""
-        return execute_query(
-            "SELECT * FROM messages WHERE session_id = %s ORDER BY created_at ASC LIMIT %s",
+    def get_session_messages(session_id: str, limit: int = 100) -> List[Dict]:
+        """Get messages for a session (returns latest 'limit' messages in chronological order)."""
+        messages = execute_query(
+            "SELECT * FROM messages WHERE session_id = %s ORDER BY created_at DESC LIMIT %s",
             (session_id, limit),
             fetch_all=True
         ) or []
+        # Reverse to return in chronological order (oldest to newest)
+        return list(reversed(messages))
