@@ -17,11 +17,12 @@ class WhatsAppService:
         self.use_vendrix = vendrix_key.startswith("vx_live") or vendrix_key.startswith("vx_test")
 
         if self.use_vendrix:
-            # Vendrix mode: send via /api/v1/messages/send
+            # Vendrix mode: align with Gateway reply endpoint
             base = (settings.VENDRIX_API_URL or "https://vendrix.net").rstrip("/")
-            self.send_url = f"{base}/api/v1/messages/send"
+            self.send_url = f"{base}/api/v1/gateway/reply"
             self.media_url_base = f"{base}/api/v1/media"
             self.access_token = vendrix_key
+            self.api_url = self.send_url
             print(f"[WHATSAPP INIT] MODE=Vendrix send_url={self.send_url}")
         else:
             # Meta Cloud API mode
@@ -33,6 +34,7 @@ class WhatsAppService:
                 self.send_url = f"https://graph.facebook.com/{self.api_version}/MISSING_PHONE_ID/messages"
                 print("[WHATSAPP WARNING] No phone_number_id configured for Meta API!")
             self.media_url_base = None
+            self.api_url = self.send_url
             print(f"[WHATSAPP INIT] MODE=Meta send_url={self.send_url}")
 
     @property
@@ -42,10 +44,18 @@ class WhatsAppService:
             "Content-Type": "application/json"
         }
 
+    def _format_phone(self, to: str) -> str:
+        """Vendrix expects E.164 format with leading '+'"""
+        if not to:
+            return to
+        t = to.strip()
+        return t if t.startswith("+") else f"+{t}"
+
     async def send_text_message(self, to: str, message: str) -> dict:
         """Send a text message."""
         if self.use_vendrix:
-            payload = {"to": to, "type": "text", "text": {"body": message}}
+            # Vendrix Gateway reply payload
+            payload = {"to": self._format_phone(to), "type": "text", "text": message}
         else:
             payload = {
                 "messaging_product": "whatsapp",
@@ -65,20 +75,10 @@ class WhatsAppService:
         buttons: list of {"id": "btn_id", "title": "Button Text"}
         """
         if self.use_vendrix:
-            payload = {
-                "to": to,
-                "type": "interactive",
-                "interactive": {
-                    "type": "button",
-                    "body": {"text": body},
-                    "action": {
-                        "buttons": [
-                            {"type": "reply", "reply": {"id": btn["id"], "title": btn["title"]}}
-                            for btn in buttons[:3]
-                        ]
-                    }
-                }
-            }
+            # Fallback to a plain text list of options in Gateway mode
+            choices = "\n".join([f"{i+1}. {btn['title']}" for i, btn in enumerate(buttons[:3])])
+            text = f"{body}\n\n{choices}"
+            return await self.send_text_message(to, text)
         else:
             payload = {
                 "messaging_product": "whatsapp",
@@ -103,6 +103,20 @@ class WhatsAppService:
 
     async def send_interactive_list(self, to: str, body: str, button_text: str, sections: list) -> dict:
         """Send interactive list message."""
+        if self.use_vendrix:
+            # Fallback to plain text listing
+            lines = [body, ""]
+            idx = 1
+            for sec in sections:
+                title = sec.get("title")
+                rows = sec.get("rows", [])
+                if title:
+                    lines.append(f"{title}:")
+                for row in rows:
+                    lines.append(f"{idx}. {row.get('title', '')}")
+                    idx += 1
+            return await self.send_text_message(to, "\n".join(lines))
+
         payload = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -113,8 +127,6 @@ class WhatsAppService:
                 "action": {"button": button_text, "sections": sections}
             }
         }
-        if self.use_vendrix:
-            del payload["messaging_product"]
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(self.send_url, json=payload, headers=self.headers)

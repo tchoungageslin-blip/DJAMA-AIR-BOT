@@ -182,22 +182,74 @@ async def webhook_receive(request: Request):
     Processes messages within the request lifecycle to avoid Vercel event loop closure.
     """
     try:
-        body = await request.json()
+        raw = await request.body()
+        raw_text = raw.decode("utf-8", errors="ignore")
+        body = json.loads(raw_text)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
+    # Optional Vendrix signature verification if headers are present
+    vendrix_sig = request.headers.get("x-vendrix-signature") or request.headers.get("X-Vendrix-Signature")
+    vendrix_ts = request.headers.get("x-vendrix-timestamp") or request.headers.get("X-Vendrix-Timestamp")
+    if vendrix_sig and vendrix_ts and settings.VENDRIX_WEBHOOK_SECRET:
+        try:
+            message_str = f"{vendrix_ts}.{raw_text}"
+            expected = hmac.new(settings.VENDRIX_WEBHOOK_SECRET.encode("utf-8"), message_str.encode("utf-8"), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, vendrix_sig):
+                raise HTTPException(status_code=403, detail="Invalid Vendrix signature")
+        except HTTPException:
+            raise
+        except Exception:
+            # If verification computation fails, fall back to allow (to avoid blocking during setup)
+            pass
+
     tasks = []
-    entry = body.get("entry", [])
-    for e in entry:
-        for change in e.get("changes", []):
-            value = change.get("value", {})
-            for message in value.get("messages", []):
-                msg_id = message.get("id", "")
-                # Skip duplicate messages (WhatsApp retries)
-                if msg_id and _is_duplicate_message(msg_id):
-                    print(f"[WEBHOOK DEDUP] Skipping duplicate message: {msg_id}")
-                    continue
+
+    # Vendrix Gateway payload support
+    if isinstance(body, dict) and body.get("event_type") and body.get("data"):
+        etype = body.get("event_type")
+        data = body.get("data", {})
+        phone = (data.get("from", "") or data.get("wa_id", "")).replace(" ", "").lstrip("+")
+        now_id = f"vendrix.{int(time.time()*1000)}"
+        if etype == "message":
+            text_body = data.get("text") or data.get("body") or ""
+            message = {"from": phone, "id": now_id, "type": "text", "text": {"body": text_body}}
+            value = {"messages": [message]}
+            if not (message["text"]["body"]):
+                pass
+            else:
+                if not _is_duplicate_message(now_id):
+                    tasks.append(_process_message(message, value))
+        elif etype == "media_message":
+            mtype = (data.get("media_type") or "document").lower()
+            if mtype not in ["image", "document", "audio"]:
+                mtype = "document"
+            media_id = data.get("id") or data.get("media_id")
+            caption = data.get("caption", "")
+            mime = data.get("mime_type") or data.get("content_type")
+            message = {"from": phone, "id": now_id, "type": mtype, mtype: {"id": media_id, "caption": caption, "mime_type": mime}}
+            value = {"messages": [message]}
+            if media_id and not _is_duplicate_message(now_id):
                 tasks.append(_process_message(message, value))
+        elif etype in ["interactive_reply", "button_click"]:
+            title = data.get("title") or data.get("text") or ""
+            message = {"from": phone, "id": now_id, "type": "interactive", "interactive": {"type": "button_reply", "button_reply": {"title": title}}}
+            value = {"messages": [message]}
+            if title and not _is_duplicate_message(now_id):
+                tasks.append(_process_message(message, value))
+        # Ignore other event types
+    else:
+        # Meta/Graph payload support
+        entry = body.get("entry", [])
+        for e in entry:
+            for change in e.get("changes", []):
+                value = change.get("value", {})
+                for message in value.get("messages", []):
+                    msg_id = message.get("id", "")
+                    if msg_id and _is_duplicate_message(msg_id):
+                        print(f"[WEBHOOK DEDUP] Skipping duplicate message: {msg_id}")
+                        continue
+                    tasks.append(_process_message(message, value))
 
     if tasks:
         try:
