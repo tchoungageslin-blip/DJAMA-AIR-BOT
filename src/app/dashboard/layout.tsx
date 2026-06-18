@@ -95,6 +95,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   // Notification state
   const [badgeCount, setBadgeCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean | null>(null);
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">("default");
   const [toasts, setToasts] = useState<AlertToast[]>([]);
 
   // Refs
@@ -134,10 +135,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       setSoundEnabled(false);
     }
     // pref === null → show permission banner
+
+    // Read current browser notification permission
+    if (!("Notification" in window)) {
+      setNotifPermission("unsupported");
+    } else {
+      setNotifPermission(Notification.permission);
+    }
   }, [router]);
 
   // ── Sound controls ───────────────────────────────────────
-  const enableSounds = useCallback(() => {
+  const enableSounds = useCallback(async () => {
     try {
       audioCtxRef.current = new (
         window.AudioContext ||
@@ -147,6 +155,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       setSoundEnabled(true);
       localStorage.setItem("sound_enabled", "true");
     } catch {}
+
+    // Request browser desktop notification permission at the same time
+    if ("Notification" in window && Notification.permission === "default") {
+      try {
+        const result = await Notification.requestPermission();
+        setNotifPermission(result);
+      } catch {}
+    } else if ("Notification" in window) {
+      setNotifPermission(Notification.permission);
+    }
   }, []);
 
   const disableSounds = useCallback(() => {
@@ -164,6 +182,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       else playAlarm(ctx);
     } catch {}
   }, [soundEnabled]);
+
+  // ── Browser desktop notifications ────────────────────────
+  const sendBrowserNotif = useCallback((title: string, body: string, type: EventType) => {
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    try {
+      const isUrgent = type !== "new_order";
+      const n = new Notification(title, {
+        body,
+        icon: "/favicon.ico",
+        tag: type,                      // Replaces previous notif of same type (no spam)
+        requireInteraction: isUrgent,   // Urgent alerts stay until dismissed
+      });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
+    } catch {}
+  }, []);
 
   // ── Toast management ─────────────────────────────────────
   const addToast = useCallback((message: string, type: EventType) => {
@@ -184,13 +221,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         fetch("/api/dashboard/orders/badges", { headers }),
       ]);
 
-      // Notifications → sounds & toasts
+      // Notifications → sounds, toasts & browser push
       if (notifRes.ok) {
         const data = await notifRes.json();
         const notifs: Array<{ type: string; created_at: string }> = data.notifications || [];
 
         if (isFirstPollRef.current) {
-          // Baseline: record current latest timestamp without triggering sounds
+          // Baseline: record current latest timestamp without triggering alerts
           if (notifs.length > 0) lastTimestampRef.current = notifs[0].created_at;
           isFirstPollRef.current = false;
         } else if (notifs.length > 0) {
@@ -207,12 +244,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             if (hasSensitive) {
               triggerSound("sensitive");
               addToast("Cas sensible détecté — action requise", "sensitive");
+              sendBrowserNotif(
+                "🚨 Cas Sensible — Action Requise",
+                "Un cas sensible a été détecté. Connectez-vous au dashboard immédiatement.",
+                "sensitive"
+              );
             } else if (hasHandoff) {
               triggerSound("handoff");
               addToast("Handoff urgent — client en attente", "handoff");
+              sendBrowserNotif(
+                "⚡ Handoff Urgent",
+                "Un client attend une prise en charge manuelle.",
+                "handoff"
+              );
             } else if (hasNewOrder) {
               triggerSound("new_order");
               addToast("Nouvelle commande reçue", "new_order");
+              sendBrowserNotif(
+                "📦 Nouvelle Commande",
+                "Une nouvelle demande de fret vient d'être enregistrée.",
+                "new_order"
+              );
             }
 
             lastTimestampRef.current = latestTs;
@@ -228,7 +280,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     } catch {
       // Silent fail — keep polling
     }
-  }, [triggerSound, addToast]);
+  }, [triggerSound, addToast, sendBrowserNotif]);
 
   useEffect(() => {
     if (!ready) return;
@@ -243,6 +295,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     localStorage.removeItem("agent");
     window.location.href = "/login";
   };
+
+  // Banner visibility: show if sounds not yet chosen OR notifications not yet granted
+  const showBanner = soundEnabled === null || (
+    notifPermission !== "unsupported" &&
+    notifPermission !== "granted" &&
+    notifPermission !== "denied"
+  );
 
   // ── Loading state ─────────────────────────────────────────
   if (!ready) {
@@ -366,12 +425,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
         </header>
 
-        {/* ── Sound permission banner (shown once, until user decides) ── */}
-        {soundEnabled === null && (
+        {/* ── Combined permission banner (sounds + desktop notifications) ── */}
+        {showBanner && (
           <div className="bg-blue-50 border-b border-blue-100 px-4 lg:px-6 py-2.5 flex flex-wrap items-center gap-3">
             <Bell className="w-4 h-4 text-blue-500 flex-shrink-0" />
             <p className="text-sm text-blue-800 flex-1 min-w-0">
-              Activer les alertes sonores pour être notifié en temps réel des nouvelles commandes et handoffs urgents.
+              Activer les alertes pour être notifié en temps réel — sons et notifications bureau, même onglet en arrière-plan.
             </p>
             <div className="flex items-center gap-2">
               <button
