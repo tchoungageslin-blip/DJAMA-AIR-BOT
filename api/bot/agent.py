@@ -431,11 +431,11 @@ class DjamaAgent:
         session_manager.clear_context(phone_number)
 
         # Send notification to agents that a new order is ready
-        await notification_service.notify_handoff(
+        await notification_service.notify_new_order(
             client_phone=phone_number,
             session_id=session["id"],
             summary=f"Nouvelle commande créée: {summary_data.get('notes', '')}",
-            tags=["NOUVELLE_COMMANDE"]
+            order_data=order_data,
         )
 
         # Store the bot response

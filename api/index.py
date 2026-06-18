@@ -16,6 +16,7 @@ from api.bot.agent import djama_agent
 from api.services.whatsapp import whatsapp_service
 from api.services.session import session_manager
 from api.services.auth import auth_service
+from api.services.notifications import notification_service
 from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
 
 

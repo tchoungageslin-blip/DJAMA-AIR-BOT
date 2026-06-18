@@ -37,12 +37,10 @@ class Settings:
     APP_ENV: str = os.getenv("APP_ENV", "development")
     APP_URL: str = os.getenv("APP_URL", "http://localhost:3000")
 
-    # Notifications
-    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
-    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: str = os.getenv("SMTP_USER", "")
-    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
-    NOTIFICATION_EMAIL_FROM: str = os.getenv("NOTIFICATION_EMAIL_FROM", "")
+    # Notifications (Resend)
+    RESEND_API_KEY: str = os.getenv("RESEND_API_KEY", "")
+    RESEND_FROM_EMAIL: str = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+    NOTIFICATION_EMAIL_TO: str = os.getenv("NOTIFICATION_EMAIL_TO", "airdjama@gmail.com")
 
     # Bot behavior
     BOT_ENABLED: bool = os.getenv("BOT_ENABLED", "true").lower() == "true"
