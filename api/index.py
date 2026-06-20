@@ -346,9 +346,26 @@ async def _process_message(message: dict, value: dict) -> None:
     if not text and not media_data:
         return
 
-    # Check global bot status
+    # Check global bot status — store message regardless, then skip response
     if not session_manager.is_bot_enabled():
-        return  # Bot globally disabled, messages go to dashboard only
+        # Still need to persist the message so it appears in the inbox
+        try:
+            client = ClientQueries.find_by_phone(phone_number)
+            if not client:
+                client = ClientQueries.create(phone_number)
+            session = SessionQueries.get_active_session(client["id"])
+            if not session:
+                session = SessionQueries.create(client["id"])
+            MessageQueries.create(
+                session_id=session["id"],
+                client_id=client["id"],
+                sender="client",
+                content=text or "[media]",
+            )
+            logger.info("Bot disabled: stored message from %s without responding", phone_number)
+        except Exception as e:
+            logger.error("Failed to store message while bot disabled: %s", e)
+        return
 
     # Route to AI agent
     try:

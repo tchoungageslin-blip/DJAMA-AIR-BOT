@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Search, Send, User, Bot, UserCheck, AlertTriangle, MessageSquare } from "lucide-react";
 
 interface Session {
@@ -31,12 +31,39 @@ export default function InboxPage() {
   const [replyText, setReplyText] = useState("");
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const selectedSessionRef = useRef<Session | null>(null);
 
   useEffect(() => {
     fetchSessions();
     const interval = setInterval(fetchSessions, 10000);
     return () => clearInterval(interval);
   }, [filter]);
+
+  // Auto-refresh messages of the selected session every 5s
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession;
+    if (!selectedSession) return;
+    const interval = setInterval(async () => {
+      const session = selectedSessionRef.current;
+      if (!session) return;
+      try {
+        const res = await fetch(`/api/dashboard/sessions/${session.id}/messages`);
+        if (res.ok) {
+          const data = await res.json();
+          setMessages(data.messages || []);
+        }
+      } catch {
+        // Silent fail
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [selectedSession?.id]);
+
+  // Scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const fetchSessions = async () => {
     try {
@@ -302,6 +329,7 @@ export default function InboxPage() {
                   )}
                 </div>
               ))}
+              <div ref={messagesEndRef} />
             </div>
 
             {/* Reply Input */}
