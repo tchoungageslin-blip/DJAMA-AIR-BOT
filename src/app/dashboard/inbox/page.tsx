@@ -31,14 +31,17 @@ export default function InboxPage() {
   const [replyText, setReplyText] = useState("");
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>("");
+  const [search, setSearch] = useState<string>("");
+  const [hideTest, setHideTest] = useState<boolean>(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const selectedSessionRef = useRef<Session | null>(null);
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     fetchSessions();
     const interval = setInterval(fetchSessions, 10000);
     return () => clearInterval(interval);
-  }, [filter]);
+  }, [filter, hideTest, search]);
 
   // Auto-refresh messages of the selected session every 5s
   useEffect(() => {
@@ -67,10 +70,11 @@ export default function InboxPage() {
 
   const fetchSessions = async () => {
     try {
-      const url = filter
-        ? `/api/dashboard/sessions?status=${filter}`
-        : "/api/dashboard/sessions";
-      const res = await fetch(url);
+      const params = new URLSearchParams();
+      if (filter) params.set("status", filter);
+      if (hideTest) params.set("hide_test", "true");
+      if (search.trim()) params.set("search", search.trim());
+      const res = await fetch(`/api/dashboard/sessions?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions || []);
@@ -80,6 +84,28 @@ export default function InboxPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+    searchTimeout.current = setTimeout(() => fetchSessions(), 400);
+  };
+
+  const formatSessionTime = (dateStr: string) => {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return "À l'instant";
+    if (diffMins < 60) return `il y a ${diffMins}min`;
+    if (diffHours < 24) return `il y a ${diffHours}h`;
+    if (diffDays === 1) return "Hier";
+    if (diffDays < 7) return `il y a ${diffDays}j`;
+    return date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
   };
 
   const selectSession = async (session: Session) => {
@@ -185,16 +211,19 @@ export default function InboxPage() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
-              placeholder="Rechercher..."
+              value={search}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              placeholder="Rechercher par nom ou numéro..."
               className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
             />
           </div>
-          <div className="flex gap-1 overflow-x-auto">
+          <div className="flex gap-1 overflow-x-auto pb-0.5">
             {[
               { value: "", label: "Tous" },
               { value: "HUMAN_HANDOFF", label: "Handoff" },
               { value: "HUMAN_ACTIVE", label: "En cours" },
               { value: "BOT_ACTIVE", label: "Bot" },
+              { value: "RESOLVED", label: "Résolu" },
             ].map((f) => (
               <button
                 key={f.value}
@@ -209,6 +238,19 @@ export default function InboxPage() {
               </button>
             ))}
           </div>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-400">{sessions.length} conversation{sessions.length !== 1 ? "s" : ""}</span>
+            <button
+              onClick={() => setHideTest(!hideTest)}
+              className={`text-[10px] px-2 py-1 rounded-full font-medium transition ${
+                hideTest
+                  ? "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                  : "bg-yellow-100 text-yellow-700 hover:bg-yellow-200"
+              }`}
+            >
+              {hideTest ? "Tests masqués" : "Afficher tests"}
+            </button>
+          </div>
         </div>
 
         {/* Session items */}
@@ -216,28 +258,38 @@ export default function InboxPage() {
           {loading ? (
             <div className="p-4 text-center text-sm text-gray-500">Chargement...</div>
           ) : sessions.length === 0 ? (
-            <div className="p-4 text-center text-sm text-gray-500">Aucune conversation</div>
+            <div className="p-8 text-center text-sm text-gray-400">
+              <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-30" />
+              <p>Aucune conversation</p>
+            </div>
           ) : (
             sessions.map((session) => (
               <button
                 key={session.id}
                 onClick={() => selectSession(session)}
                 className={`w-full p-3 border-b border-gray-50 text-left hover:bg-gray-50 transition ${
-                  selectedSession?.id === session.id ? "bg-blue-50" : ""
+                  selectedSession?.id === session.id ? "bg-blue-50 border-l-2 border-l-blue-500" : ""
                 }`}
               >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-medium text-sm text-gray-900 truncate">
-                    {session.first_name || session.phone_number}
+                <div className="flex items-start justify-between gap-1 mb-1">
+                  <span className="font-medium text-sm text-gray-900 truncate flex-1">
+                    {session.first_name
+                      ? `${session.first_name}${session.last_name ? " " + session.last_name : ""}`
+                      : session.phone_number}
                   </span>
+                  <span className="text-[10px] text-gray-400 whitespace-nowrap flex-shrink-0 mt-0.5">
+                    {formatSessionTime(session.updated_at)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs text-gray-500 truncate flex-1">
+                    {session.ai_summary || session.current_intent || session.phone_number}
+                  </p>
                   {getStatusBadge(session.status)}
                 </div>
-                <p className="text-xs text-gray-500 truncate">
-                  {session.ai_summary || session.current_intent}
-                </p>
                 {session.tags?.length > 0 && (
-                  <div className="flex gap-1 mt-1 flex-wrap">
-                    {session.tags.slice(0, 2).map((tag, i) => (
+                  <div className="flex gap-1 mt-1.5 flex-wrap">
+                    {session.tags.slice(0, 3).map((tag, i) => (
                       <span key={i} className="text-[10px] px-1.5 py-0.5 bg-yellow-50 text-yellow-700 rounded">
                         {tag}
                       </span>

@@ -616,31 +616,41 @@ async def debug_system_check():
 
 
 @app.get("/api/dashboard/sessions")
-async def get_sessions(status: Optional[str] = None):
-    """Get sessions for dashboard inbox."""
+async def get_sessions(status: Optional[str] = None, hide_test: bool = False, search: Optional[str] = None):
+    """Get sessions for dashboard inbox, sorted by most recent activity."""
     from api.db.connection import execute_query
 
+    # Build WHERE clauses
+    conditions = ["s.status != 'CLOSED'"]
+    params: list = []
+
     if status:
-        sessions = execute_query(
-            """SELECT s.*, c.phone_number, c.first_name, c.last_name, c.client_type
-            FROM sessions s JOIN clients c ON s.client_id = c.id
-            WHERE s.status = %s ORDER BY s.updated_at DESC LIMIT 50""",
-            (status,),
-            fetch_all=True
+        conditions = [f"s.status = %s"]
+        params.append(status)
+
+    # Exclude test/seed phone numbers when hide_test=True
+    if hide_test:
+        conditions.append(
+            "c.phone_number NOT SIMILAR TO '%(test|seed|0000|1111|2222|3333|4444|5555|6666|7777|8888|9999)%'"
         )
-    else:
-        sessions = execute_query(
-            """SELECT s.*, c.phone_number, c.first_name, c.last_name, c.client_type
-            FROM sessions s JOIN clients c ON s.client_id = c.id
-            WHERE s.status != 'CLOSED'
-            ORDER BY CASE s.status
-                WHEN 'HUMAN_HANDOFF' THEN 1
-                WHEN 'HUMAN_ACTIVE' THEN 2
-                WHEN 'BOT_ACTIVE' THEN 3
-                ELSE 4 END,
-            s.updated_at DESC LIMIT 50""",
-            fetch_all=True
-        )
+        conditions.append("c.phone_number NOT LIKE '+1555%'")
+
+    # Search by phone number or first name
+    if search:
+        conditions.append("(c.phone_number ILIKE %s OR c.first_name ILIKE %s OR c.last_name ILIKE %s)")
+        term = f"%{search}%"
+        params.extend([term, term, term])
+
+    where = " AND ".join(conditions)
+
+    sessions = execute_query(
+        f"""SELECT s.*, c.phone_number, c.first_name, c.last_name, c.client_type
+        FROM sessions s JOIN clients c ON s.client_id = c.id
+        WHERE {where}
+        ORDER BY s.updated_at DESC LIMIT 100""",
+        tuple(params) if params else None,
+        fetch_all=True
+    )
 
     return {"sessions": sessions or []}
 
