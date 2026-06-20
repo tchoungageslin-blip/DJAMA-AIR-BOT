@@ -81,6 +81,12 @@ def require_auth(agent: Optional[dict]) -> dict:
     return agent
 
 
+def require_dev_env() -> None:
+    """Block debug endpoints in production."""
+    if settings.APP_ENV == "production":
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 # ============================================
 # AUTH ENDPOINTS
 # ============================================
@@ -429,6 +435,7 @@ async def health_check():
 @app.post("/api/debug/test-message")
 async def debug_test_message(request: Request):
     """Debug endpoint to test bot message processing directly."""
+    require_dev_env()
     body = await request.json()
     phone = body.get("phone", "23799999999")
     text = body.get("text", "Bonjour")
@@ -452,6 +459,7 @@ async def debug_test_message(request: Request):
 @app.post("/api/debug/reset-bot")
 async def debug_reset_bot(request: Request):
     """Debug endpoint to reset a session status to BOT_ACTIVE."""
+    require_dev_env()
     body = await request.json()
     phone = body.get("phone")
     if not phone:
@@ -484,6 +492,7 @@ async def debug_reset_bot(request: Request):
 @app.get("/api/debug/system-check")
 async def debug_system_check():
     """Comprehensive system diagnostic - tests every component."""
+    require_dev_env()
     results = {}
 
     # 1. Database connectivity
@@ -716,7 +725,9 @@ async def resolve_session(session_id: str):
 
 @app.post("/api/dashboard/bot/toggle")
 async def toggle_bot(request: Request):
-    """Global kill-switch: enable/disable bot."""
+    """Global kill-switch: enable/disable bot. Requires agent auth."""
+    agent = await get_current_agent(request)
+    require_auth(agent)
     body = await request.json()
     enabled = body.get("enabled", True)
     session_manager.set_bot_enabled(enabled)
@@ -726,6 +737,7 @@ async def toggle_bot(request: Request):
 @app.post("/api/debug/test-billetterie")
 async def test_billetterie_flow():
     """End-to-end test: simulate a billetterie conversation and verify order creation."""
+    require_dev_env()
     from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
     from api.db.connection import execute_query
     import json as _json
@@ -831,6 +843,7 @@ async def test_billetterie_flow():
 @app.post("/api/debug/test-vision")
 async def test_vision_flow():
     """End-to-end test: simulate a photo upload and verify the bot doesn't ask for weight if it's in the photo."""
+    require_dev_env()
     from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
     from api.db.connection import execute_query
     import json as _json
@@ -898,49 +911,36 @@ async def test_vision_flow():
         pass
 
     return results
-async def debug_run_sql(request: Request):
-    body = await request.json()
-    sql = body.get("sql")
-    from api.db.connection import execute_query, execute_ddl
-    try:
-        upper = sql.strip().upper()
-        if upper.startswith(("ALTER ", "CREATE ", "DROP ")):
-            execute_ddl(sql)
-            return {"status": "ok", "message": "DDL executed successfully"}
-        else:
-            res = execute_query(sql, fetch_all=True)
-            return {"status": "ok", "result": res}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
 
 
 @app.post("/api/migrate")
-async def run_migration():
-    """One-shot migration: convert order_type ENUM to TEXT + add is_read column."""
+async def run_migration(request: Request):
+    """One-shot migration: convert order_type ENUM to TEXT + add is_read column. Admin only."""
+    agent = await get_current_agent(request)
+    require_auth(agent)
+    if agent.get("role") != "ADMIN":
+        raise HTTPException(status_code=403, detail="Réservé aux admins")
     from api.db.connection import execute_ddl
     results = []
-    
-    # Step 1: Convert order_type from ENUM to TEXT
+
     try:
         execute_ddl("ALTER TABLE orders ALTER COLUMN order_type TYPE TEXT;")
         results.append("order_type converted to TEXT")
     except Exception as e:
         results.append(f"order_type conversion: {e}")
-    
-    # Step 2: Add is_read column
+
     try:
         execute_ddl("ALTER TABLE orders ADD COLUMN is_read BOOLEAN DEFAULT false;")
         results.append("is_read column added")
     except Exception as e:
         results.append(f"is_read column: {e}")
-    
-    # Step 3: Also convert session_intent ENUM to TEXT for future flexibility
+
     try:
         execute_ddl("ALTER TABLE sessions ALTER COLUMN session_intent TYPE TEXT;")
         results.append("session_intent converted to TEXT")
     except Exception as e:
         results.append(f"session_intent conversion: {e}")
-    
+
     return {"status": "ok", "results": results}
 
 @app.get("/api/dashboard/orders/badges")
@@ -1256,7 +1256,9 @@ async def get_settings():
 
 @app.post("/api/dashboard/settings")
 async def update_settings(request: Request):
-    """Update app settings."""
+    """Update app settings. Requires agent auth."""
+    agent = await get_current_agent(request)
+    require_auth(agent)
     from api.db.connection import execute_query
     body = await request.json()
 

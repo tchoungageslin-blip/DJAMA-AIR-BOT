@@ -2,18 +2,26 @@ import os
 from typing import Optional
 
 
+def _require(key: str) -> str:
+    """Return env var value or raise at startup if missing in production."""
+    value = os.getenv(key, "")
+    if not value and os.getenv("APP_ENV", "development") == "production":
+        raise RuntimeError(f"Required environment variable '{key}' is not set in production.")
+    return value
+
+
 class Settings:
     # LLM (OpenRouter)
-    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_API_KEY: str = _require("OPENROUTER_API_KEY")
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o")
 
-    # Audio Transcription (Groq is recommended for fast/free Whisper)
+    # Audio Transcription
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
     # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    DATABASE_URL: str = _require("DATABASE_URL")
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "")
@@ -22,14 +30,14 @@ class Settings:
     WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("EXPO_PUBLIC_WHATSAPP_PHONE_ID", os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""))
     WHATSAPP_TOKEN: str = os.getenv("EXPO_PUBLIC_WHATSAPP_TOKEN", "")
     VENDRIX_API_KEY: str = os.getenv("VENDRIX_API_KEY", "")
-    VENDRIX_API_URL: str = os.getenv("VENDRIX_API_URL", "https://api.vendrix.net")
-    VENDRIX_WEBHOOK_SECRET: str = os.getenv("VENDRIX_WEBHOOK_SECRET", "djama-secret-123")
+    VENDRIX_API_URL: str = os.getenv("VENDRIX_API_URL", "https://vendrix.net")
+    VENDRIX_WEBHOOK_SECRET: str = os.getenv("VENDRIX_WEBHOOK_SECRET", "")
 
-    # Meta WhatsApp Cloud API webhook verification token
-    WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", os.getenv("VENDRIX_WEBHOOK_SECRET", "djama-secret-123"))
+    # Meta WhatsApp webhook verification token
+    WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", os.getenv("VENDRIX_WEBHOOK_SECRET", ""))
 
-    # Auth
-    JWT_SECRET: str = os.getenv("JWT_SECRET", "change-me-in-production")
+    # Auth — no default in production
+    JWT_SECRET: str = _require("JWT_SECRET")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
 
