@@ -1,8 +1,11 @@
 import json
+import logging
 import traceback
 from typing import Dict, Optional, Tuple
 from openai import AsyncOpenAI
 from api.config import settings
+
+logger = logging.getLogger("djama.agent")
 from api.bot.prompts import SYSTEM_PROMPT, HANDOFF_SUMMARY_PROMPT
 from api.bot.pricing import pricing_engine
 from api.bot.vision import vision_processor
@@ -131,7 +134,7 @@ class DjamaAgent:
             result = await vision_processor.analyze_image(media_data, media_type)
             return result
         except Exception as e:
-            print(f"[VISION ERROR] {e}")
+            logger.error("Vision processing error: %s", e)
             return None
 
     def _try_extract_and_save_name(self, client: Dict, bot_response: str, user_message: str) -> None:
@@ -152,7 +155,7 @@ class DjamaAgent:
                     skip = {"Air", "Logistics", "Djama", "Bonjour", "Bienvenue", "WhatsApp"}
                     if name and name not in skip and len(name) > 1:
                         ClientQueries.update(client["id"], first_name=name)
-                        print(f"[MEMORY] Saved client name: {name} (from bot response)")
+                        logger.info("Saved client name: %s (from bot response)", name)
                         return
 
             # Pattern 2: User introduced themselves "je suis X" or "je m'appelle X"
@@ -166,10 +169,10 @@ class DjamaAgent:
                         name = match.group(1).strip()
                         if name and len(name) > 1:
                             ClientQueries.update(client["id"], first_name=name)
-                            print(f"[MEMORY] Saved client name: {name} (from user message)")
+                            logger.info("Saved client name: %s (from user message)", name)
                             return
         except Exception as e:
-            print(f"[MEMORY] Name extraction error: {e}")
+            logger.debug("Name extraction error: %s", e)
 
     def _check_sensitive_text(self, text: str) -> Tuple[bool, Optional[str]]:
         """Check if message text contains sensitive keywords."""
@@ -276,8 +279,7 @@ class DjamaAgent:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"[AGENT LLM ERROR] {type(e).__name__}: {e}")
-            print(f"[AGENT LLM TRACEBACK] {traceback.format_exc()}")
+            logger.error("LLM error %s: %s\n%s", type(e).__name__, e, traceback.format_exc())
             raise
         finally:
             await client.close()
@@ -310,7 +312,7 @@ class DjamaAgent:
                 "notes": summary_data.get("notes", reason)
             }
             order_type = summary_data.get("order_type", "AUTRE")
-            print(f"[HANDOFF] LLM returned order_type={order_type}")
+            logger.info("Handoff order_type=%s", order_type)
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
             
@@ -322,8 +324,7 @@ class DjamaAgent:
                 ClientQueries.update(client["id"], first_name=extracted_name)
                 
         except Exception as e:
-            print(f"[HANDOFF] Error parsing summary or creating order: {e}")
-            print(f"[HANDOFF] Raw LLM output was: {summary_json_str}")
+            logger.error("Handoff: error parsing summary or creating order: %s | raw=%s", e, summary_json_str[:200])
             summary_data = {"notes": f"{reason} | Erreur JSON: {summary_json_str}"}
             try:
                 OrderQueries.create(
@@ -333,7 +334,7 @@ class DjamaAgent:
                     None
                 )
             except Exception as fallback_e:
-                print(f"[HANDOFF] CRITICAL: Fallback order creation failed: {fallback_e}")
+                logger.critical("Handoff: fallback order creation failed: %s", fallback_e)
 
         # 2. Update session status
         SessionQueries.update_status(
@@ -397,7 +398,7 @@ class DjamaAgent:
                 "notes": summary_data.get("notes", "Commande finalisée")
             }
             order_type = summary_data.get("order_type", "AUTRE")
-            print(f"[ORDER] LLM returned order_type={order_type} for session {session['id']}")
+            logger.info("Order order_type=%s session=%s", order_type, session["id"])
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
             
@@ -409,8 +410,7 @@ class DjamaAgent:
                 ClientQueries.update(client["id"], first_name=extracted_name)
                 
         except Exception as e:
-            print(f"[ORDER] Error parsing summary or creating order: {e}")
-            print(f"[ORDER] Raw LLM output was: {summary_json_str}")
+            logger.error("Order: error parsing summary or creating order: %s | raw=%s", e, summary_json_str[:200])
             summary_data = {"notes": f"Erreur système ou IA. Détails bruts: {summary_json_str}"}
             try:
                 # Force fallback order creation to avoid silent drops
@@ -421,7 +421,7 @@ class DjamaAgent:
                     None
                 )
             except Exception as fallback_e:
-                print(f"[ORDER] CRITICAL: Fallback order creation failed: {fallback_e}")
+                logger.critical("Order: fallback order creation failed: %s", fallback_e)
 
         # Close the current session so next message starts fresh
         # This prevents mixing old conversation context with new requests

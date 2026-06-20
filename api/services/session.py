@@ -1,7 +1,10 @@
 import json
+import logging
 import redis
 from typing import Optional, Dict, Any
 from api.config import settings
+
+logger = logging.getLogger("djama.session")
 
 
 class SessionManager:
@@ -27,9 +30,9 @@ class SessionManager:
                     retry_on_timeout=True,
                 )
                 self._redis.ping()
-                print("[SESSION] Redis connected successfully")
+                logger.info("Redis connected successfully")
             except Exception as e:
-                print(f"[SESSION WARNING] Redis unavailable ({e}), using in-memory fallback")
+                logger.warning("Redis unavailable (%s), using in-memory fallback", e)
                 self._use_fallback = True
                 return None
         else:
@@ -37,7 +40,7 @@ class SessionManager:
             try:
                 self._redis.ping()
             except Exception:
-                print("[SESSION WARNING] Redis connection lost, reconnecting...")
+                logger.warning("Redis connection lost, reconnecting...")
                 self._redis = None
                 return self.redis_client  # Retry once
         return self._redis

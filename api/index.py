@@ -1,6 +1,7 @@
 import json
 import hmac
 import hashlib
+import logging
 import traceback
 import asyncio
 import time
@@ -19,29 +20,48 @@ from api.services.auth import auth_service
 from api.services.notifications import notification_service
 from api.db.queries import ClientQueries, SessionQueries, MessageQueries, OrderQueries
 
+# Configure root logger for all djama.* loggers
+logging.basicConfig(
+    level=logging.DEBUG if settings.APP_ENV != "production" else logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("djama.webhook")
 
-# Message deduplication cache (WhatsApp retries messages)
-_processed_messages: OrderedDict = OrderedDict()
+# In-memory dedup fallback (used only when Redis is unavailable)
+_dedup_fallback: OrderedDict = OrderedDict()
 _DEDUP_MAX_SIZE = 200
 _DEDUP_TTL_SECONDS = 120
 
 
 def _is_duplicate_message(message_id: str) -> bool:
-    """Check and track message IDs to prevent duplicate processing."""
+    """Check and track message IDs to prevent duplicate processing.
+    Uses Redis when available (works across multiple Vercel instances),
+    falls back to in-memory OrderedDict for single-instance setups.
+    """
+    redis = session_manager.redis_client
+    if redis:
+        try:
+            key = f"dedup:{message_id}"
+            # SET NX EX: only set if not exists, expire after TTL
+            added = redis.set(key, "1", nx=True, ex=_DEDUP_TTL_SECONDS)
+            return added is None  # None = key already existed → duplicate
+        except Exception:
+            pass  # Fall through to in-memory fallback
+
+    # In-memory fallback
     now = time.time()
-    # Evict old entries
-    while _processed_messages:
-        oldest_id, oldest_time = next(iter(_processed_messages.items()))
+    while _dedup_fallback:
+        oldest_id, oldest_time = next(iter(_dedup_fallback.items()))
         if now - oldest_time > _DEDUP_TTL_SECONDS:
-            _processed_messages.pop(oldest_id)
+            _dedup_fallback.pop(oldest_id)
         else:
             break
-    # Cap size
-    while len(_processed_messages) >= _DEDUP_MAX_SIZE:
-        _processed_messages.popitem(last=False)
-    if message_id in _processed_messages:
+    while len(_dedup_fallback) >= _DEDUP_MAX_SIZE:
+        _dedup_fallback.popitem(last=False)
+    if message_id in _dedup_fallback:
         return True
-    _processed_messages[message_id] = now
+    _dedup_fallback[message_id] = now
     return False
 
 app = FastAPI(
@@ -254,7 +274,7 @@ async def webhook_receive(request: Request):
                 for message in value.get("messages", []):
                     msg_id = message.get("id", "")
                     if msg_id and _is_duplicate_message(msg_id):
-                        print(f"[WEBHOOK DEDUP] Skipping duplicate message: {msg_id}")
+                        logger.debug("Dedup: skipping duplicate message %s", msg_id)
                         continue
                     tasks.append(_process_message(message, value))
 
@@ -267,9 +287,9 @@ async def webhook_receive(request: Request):
             # Log any exceptions that were returned (not raised)
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    print(f"[WEBHOOK GATHER ERROR] Task {i}: {type(result).__name__}: {result}")
+                    logger.error("Webhook gather task %d failed: %s: %s", i, type(result).__name__, result)
         except asyncio.TimeoutError:
-            print("[WEBHOOK] Processing timeout after 25s")
+            logger.warning("Webhook processing timeout after 25s")
 
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
@@ -279,8 +299,8 @@ async def _process_message(message: dict, value: dict) -> None:
     phone_number = message.get("from", "")
     message_type = message.get("type", "")
     message_id = message.get("id", "")
-    print(f"[WEBHOOK PROCESS] Phone: {phone_number}, Type: {message_type}, ID: {message_id}")
-    print(f"[WEBHOOK RAW] Message: {json.dumps(message, ensure_ascii=False)}")
+    logger.info("Incoming message phone=%s type=%s id=%s", phone_number, message_type, message_id)
+    logger.debug("Raw message: %s", json.dumps(message, ensure_ascii=False))
 
     # Extract text content
     text = ""
@@ -313,13 +333,13 @@ async def _process_message(message: dict, value: dict) -> None:
                     from api.bot.audio import audio_processor
                     transcription = await audio_processor.transcribe_audio(media_data, media_type)
                     if transcription:
-                        print(f"[AUDIO] Transcribed: {transcription}")
+                        logger.info("Audio transcribed: %s", transcription[:100])
                         text = transcription
                         # We don't need to pass the raw audio data to the AI agent anymore, just the text
                         media_data = None
                         media_type = None
             except Exception as e:
-                print(f"[MEDIA ERROR] Failed to download or process media: {e}")
+                logger.error("Failed to download or process media: %s", e)
                 media_data = None
 
     # Skip empty messages
@@ -345,8 +365,7 @@ async def _process_message(message: dict, value: dict) -> None:
     except Exception as e:
         # Log error with full traceback for debugging
         error_detail = traceback.format_exc()
-        print(f"[WEBHOOK ERROR] Phone: {phone_number}, Error: {str(e)}")
-        print(f"[WEBHOOK TRACEBACK] {error_detail}")
+        logger.error("Webhook error phone=%s: %s\n%s", phone_number, e, error_detail)
 
         # Notify about the error
         error_msg = (
@@ -356,7 +375,7 @@ async def _process_message(message: dict, value: dict) -> None:
         try:
             await whatsapp_service.send_text_message(phone_number, error_msg)
         except Exception as send_err:
-            print(f"[WEBHOOK SEND ERROR] Failed to send error message: {send_err}")
+            logger.error("Failed to send error message to %s: %s", phone_number, send_err)
 
 
 @app.get("/api/cron/timeout-sessions")
@@ -411,7 +430,7 @@ async def cron_timeout_sessions():
             try:
                 await whatsapp_service.send_text_message(phone, timeout_msg)
             except Exception as e:
-                print(f"[CRON] Failed to send timeout msg to {phone}: {e}")
+                logger.error("Cron: failed to send timeout msg to %s: %s", phone, e)
                 
             results.append({"session_id": sid, "phone": phone, "status": "handed_off"})
             
@@ -642,7 +661,7 @@ async def takeover_session(session_id: str, request: Request):
         from api.db.queries import SessionQueries
         SessionQueries.update_status(session_id, "HUMAN_ACTIVE", agent_id=agent_id)
     except Exception as e:
-        print(f"Error in takeover: {e}")
+        logger.error("Takeover error: %s", e)
 
     # Disable bot in Redis
     if client:
@@ -670,7 +689,7 @@ async def release_session(session_id: str):
         from api.db.queries import SessionQueries
         SessionQueries.update_status(session_id, "BOT_ACTIVE", agent_id=None)
     except Exception as e:
-        print(f"Error in release: {e}")
+        logger.error("Release error: %s", e)
 
     if client:
         phone = client["phone_number"]

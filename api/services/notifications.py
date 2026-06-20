@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import httpx
 from api.config import settings
 from api.services.whatsapp import whatsapp_service
 from api.db.connection import execute_query
+
+logger = logging.getLogger("djama.notifications")
 
 
 class NotificationService:
@@ -86,7 +89,7 @@ class NotificationService:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, Exception):
-                    print(f"[NOTIFY ERROR] {type(r).__name__}: {r}")
+                    logger.error("Notification channel failed: %s: %s", type(r).__name__, r)
 
     # ============================================
     # CHANNEL TASKS
