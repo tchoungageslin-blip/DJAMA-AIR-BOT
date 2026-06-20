@@ -26,9 +26,13 @@ export default function SupervisionPage() {
   const toggleBot = async () => {
     setLoading(true);
     try {
+      const token = sessionStorage.getItem("token");
       const res = await fetch("/api/dashboard/bot/toggle", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ enabled: !botEnabled }),
       });
       if (res.ok) {

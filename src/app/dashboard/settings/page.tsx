@@ -27,9 +27,13 @@ export default function SettingsPage() {
   const saveSettings = async () => {
     setSaving(true);
     try {
+      const token = sessionStorage.getItem("token");
       const res = await fetch("/api/dashboard/settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify(settings),
       });
       if (res.ok) {

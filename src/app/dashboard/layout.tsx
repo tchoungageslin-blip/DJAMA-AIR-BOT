@@ -106,7 +106,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   // ── Auth check ──────────────────────────────────────────
   useEffect(() => {
-    const token = localStorage.getItem("token");
+    const token = sessionStorage.getItem("token");
     if (!token) {
       router.replace("/login");
       return;
@@ -114,7 +114,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     setReady(true);
 
     // Load sound preference
-    const pref = localStorage.getItem("sound_enabled");
+    const pref = sessionStorage.getItem("sound_enabled");
     if (pref === "true") {
       setSoundEnabled(true);
       // Lazy AudioContext creation on first click (browser autoplay policy)
@@ -153,7 +153,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         (window as any).webkitAudioContext
       )();
       setSoundEnabled(true);
-      localStorage.setItem("sound_enabled", "true");
+      sessionStorage.setItem("sound_enabled", "true");
     } catch {}
 
     // Request browser desktop notification permission at the same time
@@ -169,7 +169,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const disableSounds = useCallback(() => {
     setSoundEnabled(false);
-    localStorage.setItem("sound_enabled", "false");
+    sessionStorage.setItem("sound_enabled", "false");
   }, []);
 
   const triggerSound = useCallback((type: EventType) => {
@@ -211,7 +211,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   // ── Polling every 5 seconds ──────────────────────────────
   const poll = useCallback(async () => {
-    const token = localStorage.getItem("token");
+    const token = sessionStorage.getItem("token");
     const headers: Record<string, string> = {};
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
@@ -291,8 +291,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   // ── Handlers ─────────────────────────────────────────────
   const handleLogout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("agent");
+    sessionStorage.removeItem("token");
+    sessionStorage.removeItem("agent");
     window.location.href = "/login";
   };
 

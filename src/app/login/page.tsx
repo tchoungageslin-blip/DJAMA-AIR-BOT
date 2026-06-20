@@ -29,8 +29,8 @@ export default function LoginPage() {
       }
 
       const data = await res.json();
-      localStorage.setItem("token", data.token);
-      localStorage.setItem("agent", JSON.stringify(data.agent));
+      sessionStorage.setItem("token", data.token);
+      sessionStorage.setItem("agent", JSON.stringify(data.agent));
       router.push("/dashboard");
     } catch {
       setError("Erreur de connexion au serveur");

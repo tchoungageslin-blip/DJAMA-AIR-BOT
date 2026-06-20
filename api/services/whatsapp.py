@@ -1,6 +1,9 @@
+import logging
 import httpx
 from typing import Optional
 from api.config import settings
+
+logger = logging.getLogger("djama.whatsapp")
 
 
 class WhatsAppService:
@@ -23,7 +26,7 @@ class WhatsAppService:
             self.media_url_base = f"{base}/api/v1/media"
             self.access_token = vendrix_key
             self.api_url = self.send_url
-            print(f"[WHATSAPP INIT] MODE=Vendrix send_url={self.send_url}")
+            logger.info("MODE=Vendrix send_url=%s", self.send_url)
         else:
             # Meta Cloud API mode
             self.phone_number_id = (settings.WHATSAPP_PHONE_NUMBER_ID or "").strip()
@@ -32,10 +35,10 @@ class WhatsAppService:
                 self.send_url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
             else:
                 self.send_url = f"https://graph.facebook.com/{self.api_version}/MISSING_PHONE_ID/messages"
-                print("[WHATSAPP WARNING] No phone_number_id configured for Meta API!")
+                logger.warning("No phone_number_id configured for Meta API!")
             self.media_url_base = None
             self.api_url = self.send_url
-            print(f"[WHATSAPP INIT] MODE=Meta send_url={self.send_url}")
+            logger.info("MODE=Meta send_url=%s", self.send_url)
 
     @property
     def headers(self):
