@@ -126,12 +126,28 @@ class SessionQueries:
 
     @staticmethod
     def create(client_id: str, status: str = "BOT_ACTIVE", intent: str = "UNKNOWN") -> Dict:
-        """Create a new session."""
+        """
+        Get-or-create active session for a client.
+        Uses a CTE to atomically check for existing session before inserting,
+        preventing duplicate sessions on concurrent Vercel invocations.
+        """
         return execute_query(
-            """INSERT INTO sessions (id, client_id, status, current_intent, tags, created_at, updated_at)
-            VALUES (gen_random_uuid(), %s, %s, %s, '{}', NOW(), NOW())
-            RETURNING *""",
-            (client_id, status, intent),
+            """WITH existing AS (
+                SELECT * FROM sessions
+                WHERE client_id = %s AND status NOT IN ('RESOLVED', 'CLOSED')
+                ORDER BY created_at DESC
+                LIMIT 1
+            ), inserted AS (
+                INSERT INTO sessions (id, client_id, status, current_intent, tags, created_at, updated_at)
+                SELECT gen_random_uuid(), %s, %s, %s, '{}', NOW(), NOW()
+                WHERE NOT EXISTS (SELECT 1 FROM existing)
+                RETURNING *
+            )
+            SELECT * FROM inserted
+            UNION ALL
+            SELECT * FROM existing
+            LIMIT 1""",
+            (client_id, client_id, status, intent),
             fetch_one=True
         )
 
