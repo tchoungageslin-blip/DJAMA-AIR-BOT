@@ -6,7 +6,7 @@ import traceback
 import asyncio
 import time
 from collections import OrderedDict
-from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from typing import Optional
@@ -203,10 +203,11 @@ async def webhook_verify(request: Request):
 
 
 @app.post("/api/webhook")
-async def webhook_receive(request: Request):
+async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
     """
     Main webhook endpoint receiving messages from WhatsApp.
-    Processes messages within the request lifecycle to avoid Vercel event loop closure.
+    Returns 200 immediately to Vendrix, processes message in background.
+    This eliminates the ~25s wait before Vendrix retries and cuts perceived latency.
     """
     try:
         raw = await request.body()
@@ -227,7 +228,6 @@ async def webhook_receive(request: Request):
         except HTTPException:
             raise
         except Exception:
-            # If verification computation fails, fall back to allow (to avoid blocking during setup)
             pass
 
     tasks = []
@@ -242,11 +242,8 @@ async def webhook_receive(request: Request):
             text_body = data.get("text") or data.get("body") or ""
             message = {"from": phone, "id": now_id, "type": "text", "text": {"body": text_body}}
             value = {"messages": [message]}
-            if not (message["text"]["body"]):
-                pass
-            else:
-                if not _is_duplicate_message(now_id):
-                    tasks.append(_process_message(message, value))
+            if text_body and not _is_duplicate_message(now_id):
+                tasks.append((message, value))
         elif etype == "media_message":
             mtype = (data.get("media_type") or "document").lower()
             if mtype not in ["image", "document", "audio"]:
@@ -257,14 +254,13 @@ async def webhook_receive(request: Request):
             message = {"from": phone, "id": now_id, "type": mtype, mtype: {"id": media_id, "caption": caption, "mime_type": mime}}
             value = {"messages": [message]}
             if media_id and not _is_duplicate_message(now_id):
-                tasks.append(_process_message(message, value))
+                tasks.append((message, value))
         elif etype in ["interactive_reply", "button_click"]:
             title = data.get("title") or data.get("text") or ""
             message = {"from": phone, "id": now_id, "type": "interactive", "interactive": {"type": "button_reply", "button_reply": {"title": title}}}
             value = {"messages": [message]}
             if title and not _is_duplicate_message(now_id):
-                tasks.append(_process_message(message, value))
-        # Ignore other event types
+                tasks.append((message, value))
     else:
         # Meta/Graph payload support
         entry = body.get("entry", [])
@@ -276,22 +272,26 @@ async def webhook_receive(request: Request):
                     if msg_id and _is_duplicate_message(msg_id):
                         logger.debug("Dedup: skipping duplicate message %s", msg_id)
                         continue
-                    tasks.append(_process_message(message, value))
+                    tasks.append((message, value))
 
+    # Return 200 to Vendrix immediately, then process in background
+    # This prevents Vendrix from timing out and retrying
     if tasks:
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=25.0
-            )
-            # Log any exceptions that were returned (not raised)
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error("Webhook gather task %d failed: %s: %s", i, type(result).__name__, result)
-        except asyncio.TimeoutError:
-            logger.warning("Webhook processing timeout after 25s")
+        background_tasks.add_task(_process_messages_background, tasks)
 
     return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
+async def _process_messages_background(tasks: list) -> None:
+    """Process all incoming messages asynchronously after 200 is returned."""
+    coros = [_process_message(msg, val) for msg, val in tasks]
+    try:
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error("Background task %d failed: %s: %s", i, type(result).__name__, result)
+    except Exception as e:
+        logger.error("Background processing error: %s", e)
 
 
 async def _process_message(message: dict, value: dict) -> None:
