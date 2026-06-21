@@ -8,9 +8,11 @@ from api.bot.prompts import VISION_PROMPT
 
 logger = logging.getLogger("djama.vision")
 
+PDF_MIME_TYPES = {"application/pdf", "application/x-pdf"}
+
 
 class VisionProcessor:
-    """Processes images and PDFs using GPT-4o Vision."""
+    """Processes images and PDFs using Gemini 2.0 Flash via OpenRouter."""
 
     def _create_client(self) -> AsyncOpenAI:
         """Create a fresh client per request (avoids stale connections on Vercel serverless)."""
@@ -18,36 +20,57 @@ class VisionProcessor:
             api_key=settings.OPENROUTER_API_KEY,
             base_url=settings.OPENROUTER_BASE_URL,
             max_retries=1,
-            timeout=20.0,
+            timeout=30.0,
         )
+
+    def _is_pdf(self, media_type: str) -> bool:
+        return (media_type or "").lower() in PDF_MIME_TYPES
 
     async def analyze_image(self, image_data: bytes, media_type: str = "image/jpeg") -> Dict:
         """
-        Analyze an image (photo of package, label, screenshot).
+        Analyze an image or PDF document.
+        - Images: sent as base64 image_url (vision)
+        - PDFs: sent via OpenRouter's native PDF support with pdf-text engine (free)
         Returns extracted data (dimensions, weight, nature, hazards).
         """
-        base64_image = base64.b64encode(image_data).decode("utf-8")
+        base64_data = base64.b64encode(image_data).decode("utf-8")
         client = self._create_client()
+
+        if self._is_pdf(media_type):
+            # OpenRouter native PDF support — pdf-text engine is free for digital PDFs
+            # Falls back to mistral-ocr automatically for scanned PDFs
+            content = [
+                {"type": "text", "text": VISION_PROMPT},
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": "document.pdf",
+                        "content": base64_data,
+                    },
+                },
+            ]
+            logger.info("Vision: processing PDF document (%d bytes)", len(image_data))
+        else:
+            # Standard image (JPEG, PNG, WEBP, etc.)
+            content = [
+                {"type": "text", "text": VISION_PROMPT},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{media_type};base64,{base64_data}",
+                        "detail": "high",
+                    },
+                },
+            ]
+            logger.info("Vision: processing image %s (%d bytes)", media_type, len(image_data))
+
         try:
             response = await client.chat.completions.create(
                 model=settings.VISION_MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": VISION_PROMPT},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{base64_image}",
-                                    "detail": "high",
-                                },
-                            },
-                        ],
-                    }
-                ],
+                messages=[{"role": "user", "content": content}],
                 max_tokens=500,
                 temperature=0.1,
+                extra_body={"plugins": [{"id": "file-parser", "pdf": {"engine": "pdf-text"}}]} if self._is_pdf(media_type) else {},
             )
         finally:
             await client.close()
