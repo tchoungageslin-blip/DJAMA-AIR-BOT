@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Search, Send, User, Bot, UserCheck, AlertTriangle, MessageSquare } from "lucide-react";
 
 interface Session {
@@ -37,38 +37,7 @@ export default function InboxPage() {
   const selectedSessionRef = useRef<Session | null>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    fetchSessions();
-    const interval = setInterval(fetchSessions, 10000);
-    return () => clearInterval(interval);
-  }, [filter, hideTest, search]);
-
-  // Auto-refresh messages of the selected session every 5s
-  useEffect(() => {
-    selectedSessionRef.current = selectedSession;
-    if (!selectedSession) return;
-    const interval = setInterval(async () => {
-      const session = selectedSessionRef.current;
-      if (!session) return;
-      try {
-        const res = await fetch(`/api/dashboard/sessions/${session.id}/messages`);
-        if (res.ok) {
-          const data = await res.json();
-          setMessages(data.messages || []);
-        }
-      } catch {
-        // Silent fail
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [selectedSession?.id]);
-
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const fetchSessions = async () => {
+  const fetchSessions = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (filter) params.set("status", filter);
@@ -84,7 +53,38 @@ export default function InboxPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [filter, hideTest, search]);
+
+  useEffect(() => {
+    fetchSessions();
+    const interval = setInterval(fetchSessions, 20000);
+    return () => clearInterval(interval);
+  }, [fetchSessions]);
+
+  // Auto-refresh messages of the selected session every 8s
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession;
+    if (!selectedSession) return;
+    const interval = setInterval(async () => {
+      const session = selectedSessionRef.current;
+      if (!session) return;
+      try {
+        const res = await fetch(`/api/dashboard/sessions/${session.id}/messages`);
+        if (res.ok) {
+          const data = await res.json();
+          setMessages(data.messages || []);
+        }
+      } catch {
+        // Silent fail
+      }
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [selectedSession?.id]);
+
+  // Scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const handleSearchChange = (value: string) => {
     setSearch(value);
