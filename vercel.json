@@ -15,5 +15,10 @@
       "memory": 1024
     }
   },
-  "crons": []
+  "crons": [
+    {
+      "path": "/api/dashboard/health",
+      "schedule": "*/5 * * * *"
+    }
+  ]
 }

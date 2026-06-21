@@ -14,6 +14,50 @@ class ClientQueries:
         )
 
     @staticmethod
+    def find_by_phone_with_session(phone_number: str) -> Optional[Dict]:
+        """
+        Single query: find client AND their active session in one round-trip.
+        Returns dict with client fields + 'active_session' key (or None).
+        Saves ~1 DB round-trip per message.
+        """
+        row = execute_query(
+            """SELECT c.*,
+                s.id AS session_id,
+                s.status AS session_status,
+                s.current_intent AS session_intent,
+                s.tags AS session_tags,
+                s.ai_summary AS session_ai_summary,
+                s.updated_at AS session_updated_at,
+                s.created_at AS session_created_at
+            FROM clients c
+            LEFT JOIN sessions s ON s.client_id = c.id
+                AND s.status NOT IN ('RESOLVED', 'CLOSED')
+            WHERE c.phone_number = %s
+            ORDER BY s.created_at DESC
+            LIMIT 1""",
+            (phone_number,),
+            fetch_one=True
+        )
+        if not row:
+            return None
+        # Reconstruct client + session separately
+        client = {k: v for k, v in row.items() if not k.startswith("session_")}
+        if row.get("session_id"):
+            client["_active_session"] = {
+                "id": row["session_id"],
+                "client_id": client["id"],
+                "status": row["session_status"],
+                "current_intent": row["session_intent"],
+                "tags": row["session_tags"],
+                "ai_summary": row["session_ai_summary"],
+                "updated_at": row["session_updated_at"],
+                "created_at": row["session_created_at"],
+            }
+        else:
+            client["_active_session"] = None
+        return client
+
+    @staticmethod
     def create(phone_number: str, first_name: str = None, last_name: str = None, language: str = "fr") -> Dict:
         """Create a new client."""
         return execute_query(

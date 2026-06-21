@@ -44,15 +44,15 @@ class DjamaAgent:
         if not session_manager.is_bot_active_for_session(phone_number):
             return None  # Bot disabled, agent handles
 
-        # 2. Identify or create client
-        client = ClientQueries.find_by_phone(phone_number)
+        # 2+3. Identify or create client AND get active session in ONE query
+        client = ClientQueries.find_by_phone_with_session(phone_number)
         if not client:
             client = ClientQueries.create(phone_number)
-
-        # 3. Get or create session
-        session = SessionQueries.get_active_session(client["id"])
-        if not session:
             session = SessionQueries.create(client["id"])
+        else:
+            session = client.pop("_active_session", None)
+            if not session:
+                session = SessionQueries.create(client["id"])
 
         # 4. Store incoming message
         import base64
