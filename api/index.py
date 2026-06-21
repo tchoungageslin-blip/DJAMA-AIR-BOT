@@ -462,9 +462,9 @@ async def cron_timeout_sessions():
 # DASHBOARD API ENDPOINTS
 # ============================================
 
-@app.get("/api/dashboard/health")
+@app.api_route("/api/dashboard/health", methods=["GET", "HEAD"])
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint — accepts GET and HEAD for UptimeRobot keep-alive."""
     return {"status": "ok", "bot_enabled": session_manager.is_bot_enabled()}
 
 
