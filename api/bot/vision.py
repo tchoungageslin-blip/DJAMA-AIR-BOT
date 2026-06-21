@@ -30,7 +30,7 @@ class VisionProcessor:
         client = self._create_client()
         try:
             response = await client.chat.completions.create(
-                model=settings.LLM_MODEL,
+                model=settings.VISION_MODEL,
                 messages=[
                     {
                         "role": "user",
