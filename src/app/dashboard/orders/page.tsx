@@ -347,6 +347,53 @@ export default function OrdersPage() {
                   )}
                 </div>
 
+                {(() => {
+                  const attachments: Array<{media_url: string; media_type: string}> = (selectedOrder.data as any)?.attachments || [];
+                  if (attachments.length === 0) return null;
+                  return (
+                    <div className="space-y-3">
+                      <h3 className="font-semibold text-gray-900 border-b pb-2">Pièces jointes ({attachments.length})</h3>
+                      <div className="flex flex-wrap gap-3">
+                        {attachments.map((att, idx) => {
+                          const isImage = att.media_type?.startsWith("image/");
+                          const isPdf = att.media_type === "application/pdf";
+                          if (isImage) {
+                            return (
+                              <a key={idx} href={att.media_url} target="_blank" rel="noopener noreferrer" className="block">
+                                <img
+                                  src={att.media_url}
+                                  alt={`Pièce jointe ${idx + 1}`}
+                                  className="w-24 h-24 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition"
+                                />
+                              </a>
+                            );
+                          }
+                          if (isPdf) {
+                            return (
+                              <a key={idx} href={att.media_url} target="_blank" rel="noopener noreferrer"
+                                className="flex flex-col items-center justify-center w-24 h-24 border border-gray-200 rounded-lg bg-gray-50 hover:bg-gray-100 transition text-center p-2">
+                                <svg className="w-8 h-8 text-red-500 mb-1" fill="currentColor" viewBox="0 0 24 24">
+                                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM6 20V4h5v7h7v9H6z"/>
+                                </svg>
+                                <span className="text-xs text-gray-600">PDF {idx + 1}</span>
+                              </a>
+                            );
+                          }
+                          return (
+                            <a key={idx} href={att.media_url} target="_blank" rel="noopener noreferrer"
+                              className="flex flex-col items-center justify-center w-24 h-24 border border-gray-200 rounded-lg bg-gray-50 hover:bg-gray-100 transition text-center p-2">
+                              <svg className="w-8 h-8 text-gray-400 mb-1" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM6 20V4h5v7h7v9H6z"/>
+                              </svg>
+                              <span className="text-xs text-gray-600">Fichier {idx + 1}</span>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
               </div>
             </div>
 

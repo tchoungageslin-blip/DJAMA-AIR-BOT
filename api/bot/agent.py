@@ -13,6 +13,7 @@ from api.services.session import session_manager
 from api.services.whatsapp import whatsapp_service
 from api.services.notifications import notification_service
 from api.db.queries import ClientQueries, SessionQueries, LeadQueries, MessageQueries
+from api.db.connection import execute_query
 
 
 SENSITIVE_KEYWORDS = [
@@ -262,7 +263,7 @@ class DjamaAgent:
 
         # Add conversation history from Redis
         history = session_manager.get_message_history(phone_number)
-        for msg in history[-10:]:  # Last 10 messages for context window
+        for msg in history[-6:]:  # Last 6 messages for context window
             messages.append({"role": msg["role"], "content": msg["content"]})
 
         # Add current message
@@ -274,7 +275,7 @@ class DjamaAgent:
             response = await client.chat.completions.create(
                 model=settings.LLM_MODEL,
                 messages=messages,
-                max_tokens=300,
+                max_tokens=200,
                 temperature=0.7,
             )
             return response.choices[0].message.content.strip()
@@ -298,7 +299,10 @@ class DjamaAgent:
             # Parse JSON safely (sometimes LLM wraps in ```json)
             clean_str = summary_json_str.replace("```json", "").replace("```", "").strip()
             summary_data = json.loads(clean_str)
-            
+
+            # Collect media attachments from the session (photos, docs — no audio)
+            attachments = self._collect_session_media(session["id"])
+
             # Create Order
             order_data = {
                 "origin": summary_data.get("origin"),
@@ -309,13 +313,14 @@ class DjamaAgent:
                 "fragility": summary_data.get("fragility", "STANDARD"),
                 "shipping_mode": summary_data.get("shipping_mode"),
                 "is_sensitive": summary_data.get("is_sensitive", False),
-                "notes": summary_data.get("notes", reason)
+                "notes": summary_data.get("notes", reason),
+                "attachments": attachments,
             }
             order_type = summary_data.get("order_type", "AUTRE")
-            logger.info("Handoff order_type=%s", order_type)
+            logger.info("Handoff order_type=%s attachments=%d", order_type, len(attachments))
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
-            
+
             OrderQueries.create(client["id"], order_type, order_data, est_price)
             
             # Update client name if found and missing
@@ -373,6 +378,25 @@ class DjamaAgent:
 
         return final_response
 
+    def _collect_session_media(self, session_id: str) -> list:
+        """
+        Collect all client media (photos, documents) sent during the session.
+        Returns list of {media_url, media_type, created_at} for attachment to order.
+        """
+        try:
+            rows = execute_query(
+                """SELECT media_url, media_type, created_at FROM messages
+                WHERE session_id = %s AND sender = 'client'
+                AND media_url IS NOT NULL AND media_type NOT LIKE 'audio%%'
+                ORDER BY created_at ASC""",
+                (session_id,),
+                fetch_all=True
+            )
+            return [{"media_url": r["media_url"], "media_type": r["media_type"]} for r in (rows or [])]
+        except Exception as e:
+            logger.warning("Could not collect session media: %s", e)
+            return []
+
     async def _finalize_order(self, client: Dict, session: Dict, phone_number: str, bot_response: str) -> str:
         """Process a completed order qualification WITHOUT blocking the bot."""
         from api.db.queries import OrderQueries
@@ -380,11 +404,14 @@ class DjamaAgent:
         # 1. Generate structured JSON summary from conversation
         summary_json_str = await self.generate_handoff_summary(session["id"])
         summary_data = {}
-        
+
         try:
             clean_str = summary_json_str.replace("```json", "").replace("```", "").strip()
             summary_data = json.loads(clean_str)
-            
+
+            # Collect media attachments from the session (photos, docs — no audio)
+            attachments = self._collect_session_media(session["id"])
+
             # Create Order
             order_data = {
                 "origin": summary_data.get("origin"),
@@ -395,13 +422,14 @@ class DjamaAgent:
                 "fragility": summary_data.get("fragility", "STANDARD"),
                 "shipping_mode": summary_data.get("shipping_mode"),
                 "is_sensitive": summary_data.get("is_sensitive", False),
-                "notes": summary_data.get("notes", "Commande finalisée")
+                "notes": summary_data.get("notes", "Commande finalisée"),
+                "attachments": attachments,
             }
             order_type = summary_data.get("order_type", "AUTRE")
-            logger.info("Order order_type=%s session=%s", order_type, session["id"])
+            logger.info("Order order_type=%s session=%s attachments=%d", order_type, session["id"], len(attachments))
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
-            
+
             OrderQueries.create(client["id"], order_type, order_data, est_price)
             
             # Update client name if found and missing
