@@ -253,10 +253,23 @@ class DjamaAgent:
 
         return "\n".join(context_parts)
 
+    def _get_system_prompt(self) -> str:
+        """Load system prompt from DB settings (admin override), fallback to hardcoded."""
+        try:
+            row = execute_query(
+                "SELECT value FROM settings WHERE key = 'system_prompt'",
+                fetch_one=True
+            )
+            if row and row.get("value"):
+                return row["value"]
+        except Exception:
+            pass
+        return SYSTEM_PROMPT
+
     async def _get_ai_response(self, phone_number: str, user_message: str, context: str) -> str:
         """Get response from GPT-4o via OpenRouter."""
         # Build messages array with history
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": self._get_system_prompt()}]
 
         if context:
             messages.append({"role": "system", "content": f"CONTEXTE ACTUEL:\n{context}"})

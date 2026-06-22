@@ -1317,3 +1317,46 @@ async def update_settings(request: Request):
         )
 
     return {"status": "updated"}
+
+
+@app.get("/api/dashboard/ai/prompt")
+async def get_ai_prompt():
+    """Get the current AI system prompt (DB override or hardcoded default)."""
+    from api.db.connection import execute_query
+    from api.bot.prompts import SYSTEM_PROMPT
+    row = execute_query(
+        "SELECT value FROM settings WHERE key = 'system_prompt'",
+        fetch_one=True
+    )
+    prompt = row["value"] if row else SYSTEM_PROMPT
+    is_custom = bool(row)
+    return {"prompt": prompt, "is_custom": is_custom}
+
+
+@app.post("/api/dashboard/ai/prompt")
+async def save_ai_prompt(request: Request):
+    """Save a custom AI system prompt to the DB. Requires auth."""
+    agent = await get_current_agent(request)
+    require_auth(agent)
+    from api.db.connection import execute_query
+    body = await request.json()
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Le prompt ne peut pas être vide")
+    execute_query(
+        """INSERT INTO settings (id, key, value)
+        VALUES (gen_random_uuid(), 'system_prompt', %s)
+        ON CONFLICT (key) DO UPDATE SET value = %s""",
+        (prompt, prompt)
+    )
+    return {"status": "saved"}
+
+
+@app.delete("/api/dashboard/ai/prompt")
+async def reset_ai_prompt(request: Request):
+    """Reset the AI system prompt to the hardcoded default."""
+    agent = await get_current_agent(request)
+    require_auth(agent)
+    from api.db.connection import execute_query
+    execute_query("DELETE FROM settings WHERE key = 'system_prompt'")
+    return {"status": "reset"}
