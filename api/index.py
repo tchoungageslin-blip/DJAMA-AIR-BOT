@@ -615,6 +615,63 @@ async def debug_system_check():
     return {"overall": "ok" if all_ok else "issues_found", "components": results}
 
 
+@app.get("/api/dashboard/clients")
+async def get_clients(search: Optional[str] = None):
+    """CRM: list all clients with aggregated data."""
+    from api.db.connection import execute_query
+
+    conditions = ["1=1"]
+    params: list = []
+
+    if search:
+        conditions.append("(c.phone_number ILIKE %s OR c.first_name ILIKE %s OR c.last_name ILIKE %s)")
+        term = f"%{search}%"
+        params.extend([term, term, term])
+
+    where = " AND ".join(conditions)
+
+    clients = execute_query(
+        f"""SELECT
+            c.id,
+            c.phone_number,
+            c.first_name,
+            c.last_name,
+            c.client_type,
+            c.created_at AS first_contact,
+            COUNT(DISTINCT s.id) AS session_count,
+            COUNT(DISTINCT o.id) AS order_count,
+            MAX(s.updated_at) AS last_activity,
+            (SELECT ai_summary FROM sessions WHERE client_id = c.id
+             AND ai_summary IS NOT NULL ORDER BY updated_at DESC LIMIT 1) AS last_summary,
+            (SELECT order_type FROM orders WHERE client_id = c.id
+             ORDER BY created_at DESC LIMIT 1) AS last_order_type,
+            (SELECT status FROM orders WHERE client_id = c.id
+             ORDER BY created_at DESC LIMIT 1) AS last_order_status,
+            COALESCE(SUM(o.estimated_price), 0)::bigint AS total_revenue
+        FROM clients c
+        LEFT JOIN sessions s ON s.client_id = c.id
+        LEFT JOIN orders o ON o.client_id = c.id
+        WHERE {where}
+        GROUP BY c.id
+        ORDER BY MAX(s.updated_at) DESC NULLS LAST
+        LIMIT 200""",
+        tuple(params) if params else None,
+        fetch_all=True
+    )
+    return {"clients": clients or []}
+
+
+@app.get("/api/dashboard/clients/{client_id}/orders")
+async def get_client_orders(client_id: str):
+    """CRM: get all orders for a specific client."""
+    from api.db.connection import execute_query
+    orders = execute_query(
+        """SELECT * FROM orders WHERE client_id = %s ORDER BY created_at DESC""",
+        (client_id,), fetch_all=True
+    )
+    return {"orders": orders or []}
+
+
 @app.get("/api/dashboard/sessions")
 async def get_sessions(status: Optional[str] = None, hide_test: bool = False, search: Optional[str] = None):
     """Get sessions for dashboard inbox, sorted by most recent activity."""

@@ -17,6 +17,7 @@ import {
   Volume2,
   VolumeX,
   X,
+  Users,
 } from "lucide-react";
 
 // ============================================================
@@ -75,6 +76,7 @@ const navItems = [
   { href: "/dashboard", label: "Vue d'ensemble", icon: BarChart3, exact: true },
   { href: "/dashboard/inbox", label: "Inbox", icon: MessageSquare, exact: false },
   { href: "/dashboard/orders", label: "Commandes", icon: Package, exact: false },
+  { href: "/dashboard/crm", label: "CRM Clients", icon: Users, exact: false },
   { href: "/dashboard/pricing", label: "Grilles Tarifaires", icon: DollarSign, exact: false },
   { href: "/dashboard/supervision", label: "Supervision IA", icon: Bot, exact: false },
   { href: "/dashboard/settings", label: "Paramètres", icon: Settings, exact: false },
@@ -103,6 +105,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const lastTimestampRef = useRef<string | null>(null);
   const isFirstPollRef = useRef(true);
   const toastIdRef = useRef(0);
+
+  // ── Service Worker (PWA) ─────────────────────────────────
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  }, []);
 
   // ── Auth check ──────────────────────────────────────────
   useEffect(() => {
