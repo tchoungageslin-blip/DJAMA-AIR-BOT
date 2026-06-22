@@ -187,7 +187,8 @@ export default function CRMPage() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Client</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Téléphone</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Nom</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">1er contact</th>
                   <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Sessions</th>
                   <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Commandes</th>
@@ -208,13 +209,19 @@ export default function CRMPage() {
                         <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
                           <span className="text-xs font-bold text-blue-700">{clientInitials(client)}</span>
                         </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-gray-900 truncate">{clientDisplayName(client)}</p>
-                          <p className="text-xs text-gray-400 flex items-center gap-1">
-                            <Phone className="w-3 h-3" />{client.phone_number}
-                          </p>
-                        </div>
+                        <p className="text-sm font-medium text-gray-900 flex items-center gap-1">
+                          <Phone className="w-3 h-3 text-gray-400" />{client.phone_number}
+                        </p>
                       </div>
+                    </td>
+                    <td className="px-4 py-3 hidden sm:table-cell">
+                      {client.first_name ? (
+                        <span className="text-sm font-medium text-gray-900">
+                          {client.first_name}{client.last_name ? " " + client.last_name : ""}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">Non renseigné</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 hidden md:table-cell">
                       <div className="flex items-center gap-1 text-xs text-gray-500">

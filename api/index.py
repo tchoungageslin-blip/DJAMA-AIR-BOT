@@ -653,6 +653,7 @@ async def get_clients(search: Optional[str] = None):
         LEFT JOIN orders o ON o.client_id = c.id
         WHERE {where}
         GROUP BY c.id
+        HAVING COUNT(DISTINCT o.id) > 0
         ORDER BY MAX(s.updated_at) DESC NULLS LAST
         LIMIT 200""",
         tuple(params) if params else None,
