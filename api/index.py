@@ -232,36 +232,52 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
 
     tasks = []
 
+    logger.info("Webhook received: keys=%s", list(body.keys()) if isinstance(body, dict) else type(body).__name__)
+
+    def _normalize_phone(raw: str) -> str:
+        """Normalize phone to consistent format: digits only, no leading +."""
+        return raw.replace(" ", "").replace("-", "").lstrip("+").strip()
+
     # Vendrix Gateway payload support
     if isinstance(body, dict) and body.get("event_type") and body.get("data"):
-        etype = body.get("event_type")
+        etype = body.get("event_type", "").lower()
         data = body.get("data", {})
-        phone = (data.get("from", "") or data.get("wa_id", "")).replace(" ", "").lstrip("+")
+        phone = _normalize_phone(data.get("from", "") or data.get("wa_id", "") or data.get("phone", "") or "")
         now_id = f"vendrix.{int(time.time()*1000)}"
-        if etype == "message":
-            text_body = data.get("text") or data.get("body") or ""
+        logger.info("Vendrix event_type=%s phone=%s", etype, phone)
+
+        if etype in ("message", "text_message", "incoming_message", "text"):
+            text_body = data.get("text") or data.get("body") or data.get("message") or data.get("content") or ""
             message = {"from": phone, "id": now_id, "type": "text", "text": {"body": text_body}}
             value = {"messages": [message]}
             if text_body and not _is_duplicate_message(now_id):
                 tasks.append((message, value))
-        elif etype == "media_message":
-            mtype = (data.get("media_type") or "document").lower()
+            else:
+                logger.warning("Vendrix text event: empty body or duplicate. data=%s", data)
+
+        elif etype in ("media_message", "image_message", "document_message", "audio_message", "media"):
+            mtype = (data.get("media_type") or data.get("type") or "document").lower()
             if mtype not in ["image", "document", "audio"]:
                 mtype = "document"
-            media_id = data.get("id") or data.get("media_id")
+            media_id = data.get("id") or data.get("media_id") or data.get("file_id")
             caption = data.get("caption", "")
             mime = data.get("mime_type") or data.get("content_type")
             message = {"from": phone, "id": now_id, "type": mtype, mtype: {"id": media_id, "caption": caption, "mime_type": mime}}
             value = {"messages": [message]}
             if media_id and not _is_duplicate_message(now_id):
                 tasks.append((message, value))
-        elif etype in ["interactive_reply", "button_click"]:
-            title = data.get("title") or data.get("text") or ""
+
+        elif etype in ("interactive_reply", "button_click", "button_reply"):
+            title = data.get("title") or data.get("text") or data.get("body") or ""
             message = {"from": phone, "id": now_id, "type": "interactive", "interactive": {"type": "button_reply", "button_reply": {"title": title}}}
             value = {"messages": [message]}
             if title and not _is_duplicate_message(now_id):
                 tasks.append((message, value))
-    else:
+
+        else:
+            logger.warning("Vendrix: unhandled event_type=%s — full payload: %s", etype, json.dumps(body)[:500])
+
+    elif isinstance(body, dict) and body.get("entry"):
         # Meta/Graph payload support
         entry = body.get("entry", [])
         for e in entry:
@@ -273,6 +289,9 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
                         logger.debug("Dedup: skipping duplicate message %s", msg_id)
                         continue
                     tasks.append((message, value))
+
+    else:
+        logger.warning("Webhook: unknown payload format — %s", json.dumps(body)[:300])
 
     # Return 200 to Vendrix immediately, then process in background
     # This prevents Vendrix from timing out and retrying
@@ -523,6 +542,18 @@ async def debug_reset_bot(request: Request):
         return {"status": "ok", "message": f"Bot re-enabled for {phone}"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/debug/webhook-echo")
+async def webhook_echo(request: Request):
+    """Echo any payload to diagnose what Vendrix actually sends."""
+    try:
+        raw = await request.body()
+        body = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception:
+        body = {}
+    logger.info("WEBHOOK ECHO: %s", json.dumps(body)[:1000])
+    return {"received": body, "headers": dict(request.headers)}
 
 
 @app.get("/api/debug/system-check")
