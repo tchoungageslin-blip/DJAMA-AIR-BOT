@@ -720,9 +720,9 @@ async def get_sessions(status: Optional[str] = None, hide_test: bool = False, se
     # Exclude test/seed phone numbers when hide_test=True
     if hide_test:
         conditions.append(
-            "c.phone_number NOT SIMILAR TO '%(test|seed|0000|1111|2222|3333|4444|5555|6666|7777|8888|9999)%'"
+            "c.phone_number NOT SIMILAR TO '%%(test|seed|0000|1111|2222|3333|4444|5555|6666|7777|8888|9999)%%'"
         )
-        conditions.append("c.phone_number NOT LIKE '+1555%'")
+        conditions.append("c.phone_number NOT LIKE '+1555%%'")
 
     # Search by phone number or first name
     if search:
