@@ -291,12 +291,24 @@ class DjamaAgent:
                 max_tokens=200,
                 temperature=0.7,
             )
-            return response.choices[0].message.content.strip()
+            raw = response.choices[0].message.content.strip()
+            return self._sanitize_response(raw)
         except Exception as e:
             logger.error("LLM error %s: %s\n%s", type(e).__name__, e, traceback.format_exc())
             raise
         finally:
             await client.close()
+
+    def _sanitize_response(self, text: str) -> str:
+        """Strip any internal context tags the LLM may have leaked into its response."""
+        import re
+        # Remove lines starting with [MEMOIRE], [SESSION], [ACTION] (except TRANSFERT which we handle separately)
+        lines = text.splitlines()
+        clean = [
+            line for line in lines
+            if not re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE)\]', line, re.IGNORECASE)
+        ]
+        return "\n".join(clean).strip()
 
     async def _trigger_handoff(self, client: Dict, session: Dict,
                                phone_number: str, reason: str, tags: list = None,
