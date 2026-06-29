@@ -18,6 +18,7 @@ import {
   VolumeX,
   X,
   Users,
+  BookOpen,
 } from "lucide-react";
 
 // ============================================================
@@ -78,6 +79,7 @@ const navItems = [
   { href: "/dashboard/orders", label: "Commandes", icon: Package, exact: false },
   { href: "/dashboard/crm", label: "CRM Clients", icon: Users, exact: false },
   { href: "/dashboard/pricing", label: "Grilles Tarifaires", icon: DollarSign, exact: false },
+  { href: "/dashboard/knowledge", label: "Base de connaissances", icon: BookOpen, exact: false },
   { href: "/dashboard/supervision", label: "Supervision IA", icon: Bot, exact: false },
   { href: "/dashboard/settings", label: "Paramètres", icon: Settings, exact: false },
 ];

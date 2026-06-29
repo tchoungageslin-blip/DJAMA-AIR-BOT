@@ -1449,3 +1449,62 @@ async def reset_ai_prompt(request: Request):
     from api.db.connection import execute_query
     execute_query("DELETE FROM settings WHERE key = 'system_prompt'")
     return {"status": "reset"}
+
+
+# ============================================
+# KNOWLEDGE GAPS
+# ============================================
+
+@app.get("/api/dashboard/knowledge-gaps")
+async def get_knowledge_gaps(request: Request, status: str = "pending"):
+    agent = await get_current_agent(request)
+    require_auth(agent)
+    from api.db.connection import execute_query
+    if status == "answered":
+        rows = execute_query(
+            """SELECT id::text, question, client_phone, created_at::text, answer,
+                      answered_at::text, answered_by
+               FROM knowledge_gaps
+               WHERE answer IS NOT NULL AND is_dismissed = FALSE
+               ORDER BY answered_at DESC LIMIT 100""",
+            fetch_all=True
+        )
+    else:
+        rows = execute_query(
+            """SELECT id::text, question, client_phone, session_id::text, created_at::text
+               FROM knowledge_gaps
+               WHERE answer IS NULL AND is_dismissed = FALSE
+               ORDER BY created_at DESC LIMIT 100""",
+            fetch_all=True
+        )
+    return {"gaps": [dict(r) for r in (rows or [])]}
+
+
+@app.post("/api/dashboard/knowledge-gaps/{gap_id}/answer")
+async def answer_knowledge_gap(gap_id: str, request: Request):
+    agent = await get_current_agent(request)
+    require_auth(agent)
+    from api.db.connection import execute_query
+    body = await request.json()
+    answer = (body.get("answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="Réponse requise")
+    execute_query(
+        """UPDATE knowledge_gaps
+           SET answer = %s, answered_at = NOW(), answered_by = %s
+           WHERE id = %s::uuid""",
+        (answer, agent.get("full_name") or agent.get("email", "admin"), gap_id)
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/dashboard/knowledge-gaps/{gap_id}")
+async def dismiss_knowledge_gap(gap_id: str, request: Request):
+    agent = await get_current_agent(request)
+    require_auth(agent)
+    from api.db.connection import execute_query
+    execute_query(
+        "UPDATE knowledge_gaps SET is_dismissed = TRUE WHERE id = %s::uuid",
+        (gap_id,)
+    )
+    return {"ok": True}

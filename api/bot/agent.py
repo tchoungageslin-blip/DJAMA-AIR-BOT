@@ -100,7 +100,10 @@ class DjamaAgent:
 
         # 7. Build context and get AI response
         context = self._build_context(client, session, phone_number, vision_data)
-        response = await self._get_ai_response(phone_number, message_text, context)
+        raw_response = await self._get_ai_response(phone_number, message_text, context)
+        response, gap_question = self._extract_knowledge_gap(raw_response)
+        if gap_question:
+            self._save_knowledge_gap(gap_question, phone_number, session["id"])
 
         # 8. Check for manual handoff triggered by the LLM
         if "[ACTION: TRANSFERT]" in response:
@@ -254,17 +257,19 @@ class DjamaAgent:
         return "\n".join(context_parts)
 
     def _get_system_prompt(self) -> str:
-        """Load system prompt from DB settings (admin override), fallback to hardcoded."""
+        """Load system prompt from DB (admin override or default), then append answered knowledge."""
         try:
             row = execute_query(
                 "SELECT value FROM settings WHERE key = 'system_prompt'",
                 fetch_one=True
             )
-            if row and row.get("value"):
-                return row["value"]
+            base = row["value"] if row and row.get("value") else SYSTEM_PROMPT
         except Exception:
-            pass
-        return SYSTEM_PROMPT
+            base = SYSTEM_PROMPT
+        knowledge = self._get_bot_knowledge()
+        if knowledge:
+            base = base + "\n\n" + knowledge
+        return base
 
     async def _get_ai_response(self, phone_number: str, user_message: str, context: str) -> str:
         """Get response from GPT-4o via OpenRouter."""
@@ -300,15 +305,54 @@ class DjamaAgent:
             await client.close()
 
     def _sanitize_response(self, text: str) -> str:
-        """Strip any internal context tags the LLM may have leaked into its response."""
+        """Strip internal context tags the LLM may have leaked. Keeps [GAP:] for later extraction."""
         import re
-        # Remove lines starting with [MEMOIRE], [SESSION], [ACTION] (except TRANSFERT which we handle separately)
         lines = text.splitlines()
         clean = [
             line for line in lines
             if not re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE)\]', line, re.IGNORECASE)
         ]
         return "\n".join(clean).strip()
+
+    def _extract_knowledge_gap(self, text: str) -> Tuple[str, Optional[str]]:
+        """Extract [GAP: question] tag. Returns (clean_text, gap_question or None)."""
+        import re
+        match = re.search(r'\[GAP:\s*(.+?)\]', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            gap_question = match.group(1).strip()
+            clean = re.sub(r'\n?\[GAP:[^\]]+\]', '', text).strip()
+            return clean, gap_question
+        return text, None
+
+    def _save_knowledge_gap(self, question: str, client_phone: str, session_id: str) -> None:
+        """Save an unanswered question to the knowledge_gaps table."""
+        try:
+            execute_query(
+                """INSERT INTO knowledge_gaps (question, client_phone, session_id, created_at)
+                   VALUES (%s, %s, %s, NOW())""",
+                (question, client_phone, session_id)
+            )
+            logger.info("Knowledge gap saved: %s", question[:100])
+        except Exception as e:
+            logger.error("Failed to save knowledge gap: %s", e)
+
+    def _get_bot_knowledge(self) -> str:
+        """Load admin-answered knowledge gaps and return as extra prompt context."""
+        try:
+            rows = execute_query(
+                """SELECT question, answer FROM knowledge_gaps
+                   WHERE answer IS NOT NULL AND is_dismissed = FALSE
+                   ORDER BY answered_at DESC LIMIT 30""",
+                fetch_all=True
+            )
+            if not rows:
+                return ""
+            lines = ["BASE DE CONNAISSANCES VALIDÉE PAR L'ADMIN :"]
+            for r in rows:
+                lines.append(f"Q: {r['question']}\nR: {r['answer']}")
+            return "\n\n".join(lines)
+        except Exception:
+            return ""
 
     async def _trigger_handoff(self, client: Dict, session: Dict,
                                phone_number: str, reason: str, tags: list = None,
