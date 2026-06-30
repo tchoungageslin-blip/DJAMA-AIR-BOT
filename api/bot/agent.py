@@ -217,10 +217,10 @@ class DjamaAgent:
                     notes = data.get("notes", "")
                     date_str = str(o.get("created_at", ""))[:10]
                     context_parts.append(
-                        f"  - {o['order_number']} ({o['order_type']}) {origin} -> {dest} | {o['status']} | {date_str}"
+                        f"[MEMOIRE]   - {o['order_number']} ({o['order_type']}) {origin} -> {dest} | {o['status']} | {date_str}"
                     )
                     if notes:
-                        context_parts.append(f"    Details: {notes[:100]}")
+                        context_parts.append(f"[MEMOIRE]     Details: {notes[:100]}")
             else:
                 context_parts.append("[MEMOIRE] Nouveau client, aucune commande precedente")
         except Exception:
@@ -281,7 +281,7 @@ class DjamaAgent:
 
         # Add conversation history from Redis
         history = session_manager.get_message_history(phone_number)
-        for msg in history[-6:]:  # Last 6 messages for context window
+        for msg in history[-10:]:  # Last 10 messages for context window
             messages.append({"role": msg["role"], "content": msg["content"]})
 
         # Add current message
@@ -293,7 +293,7 @@ class DjamaAgent:
             response = await client.chat.completions.create(
                 model=settings.LLM_MODEL,
                 messages=messages,
-                max_tokens=200,
+                max_tokens=400,
                 temperature=0.7,
             )
             raw = response.choices[0].message.content.strip()

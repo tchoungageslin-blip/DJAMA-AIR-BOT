@@ -302,13 +302,26 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
 
 
 async def _process_messages_background(tasks: list) -> None:
-    """Process all incoming messages asynchronously after 200 is returned."""
-    coros = [_process_message(msg, val) for msg, val in tasks]
+    """Process incoming messages sequentially per phone number to avoid race conditions.
+    Messages from different phones can run in parallel; same phone always sequential."""
+    from collections import defaultdict
+    # Group by phone number
+    by_phone: dict = defaultdict(list)
+    for msg, val in tasks:
+        phone = msg.get("from", "unknown")
+        by_phone[phone].append((msg, val))
+
+    async def _process_phone_messages(phone: str, phone_tasks: list) -> None:
+        for msg, val in phone_tasks:
+            try:
+                await _process_message(msg, val)
+            except Exception as e:
+                logger.error("Background task failed phone=%s: %s: %s", phone, type(e).__name__, e)
+
+    # Run per-phone queues in parallel (different phones), sequential within each phone
+    coros = [_process_phone_messages(phone, phone_tasks) for phone, phone_tasks in by_phone.items()]
     try:
-        results = await asyncio.gather(*coros, return_exceptions=True)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error("Background task %d failed: %s: %s", i, type(result).__name__, result)
+        await asyncio.gather(*coros, return_exceptions=True)
     except Exception as e:
         logger.error("Background processing error: %s", e)
 
@@ -361,9 +374,14 @@ async def _process_message(message: dict, value: dict) -> None:
                 logger.error("Failed to download or process media: %s", e)
                 media_data = None
 
-    # Skip empty messages
+    # Skip empty or meaningless messages (dots, single chars, pure punctuation)
     if not text and not media_data:
         return
+    if text and not media_data:
+        stripped = text.strip().replace(".", "").replace("?", "").replace("!", "").replace(" ", "")
+        if len(stripped) <= 2:
+            logger.info("Skipping meaningless message: %r from %s", text, phone_number)
+            return
 
     # Check global bot status — store message regardless, then skip response
     if not session_manager.is_bot_enabled():

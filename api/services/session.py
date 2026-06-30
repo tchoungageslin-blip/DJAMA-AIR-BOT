@@ -57,8 +57,8 @@ class SessionManager:
             return json.loads(data)
         return None
 
-    def set_context(self, phone_number: str, context: Dict[str, Any], ttl_seconds: int = 3600) -> None:
-        """Set conversation context with TTL (default 1 hour)."""
+    def set_context(self, phone_number: str, context: Dict[str, Any], ttl_seconds: int = 86400) -> None:
+        """Set conversation context with TTL (default 24 hours)."""
         if self._use_fallback:
             self._fallback[self._key(phone_number)] = context
             return
