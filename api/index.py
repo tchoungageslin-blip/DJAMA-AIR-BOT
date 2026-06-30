@@ -31,7 +31,7 @@ logger = logging.getLogger("djama.webhook")
 # In-memory dedup fallback (used only when Redis is unavailable)
 _dedup_fallback: OrderedDict = OrderedDict()
 _DEDUP_MAX_SIZE = 200
-_DEDUP_TTL_SECONDS = 120
+_DEDUP_TTL_SECONDS = 300
 
 
 def _is_duplicate_message(message_id: str) -> bool:
@@ -209,26 +209,21 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
     Returns 200 immediately to Vendrix, processes message in background.
     This eliminates the ~25s wait before Vendrix retries and cuts perceived latency.
     """
+    raw = await request.body()
+    raw_text = raw.decode("utf-8", errors="ignore")
+
+    # Meta X-Hub-Signature-256 validation (required for production)
+    meta_sig = request.headers.get("x-hub-signature-256", "")
+    if settings.META_APP_SECRET and meta_sig:
+        expected = "sha256=" + hmac.new(settings.META_APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, meta_sig):
+            logger.warning("Webhook: invalid Meta signature — rejected")
+            raise HTTPException(status_code=403, detail="Invalid signature")
+
     try:
-        raw = await request.body()
-        raw_text = raw.decode("utf-8", errors="ignore")
         body = json.loads(raw_text)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    # Optional Vendrix signature verification if headers are present
-    vendrix_sig = request.headers.get("x-vendrix-signature") or request.headers.get("X-Vendrix-Signature")
-    vendrix_ts = request.headers.get("x-vendrix-timestamp") or request.headers.get("X-Vendrix-Timestamp")
-    if vendrix_sig and vendrix_ts and settings.VENDRIX_WEBHOOK_SECRET:
-        try:
-            message_str = f"{vendrix_ts}.{raw_text}"
-            expected = hmac.new(settings.VENDRIX_WEBHOOK_SECRET.encode("utf-8"), message_str.encode("utf-8"), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected, vendrix_sig):
-                raise HTTPException(status_code=403, detail="Invalid Vendrix signature")
-        except HTTPException:
-            raise
-        except Exception:
-            pass
 
     tasks = []
 
@@ -301,6 +296,17 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
 
+async def _crash_notify_allowed(phone: str) -> bool:
+    """Allow max 1 crash notification per phone per hour."""
+    redis = session_manager.redis_client
+    if not redis:
+        return True
+    try:
+        return redis.set(f"crash_notif:{phone}", "1", nx=True, ex=3600) is not None
+    except Exception:
+        return True
+
+
 async def _acquire_phone_lock(phone: str, timeout: int = 45) -> bool:
     """Distributed lock: prevent two Vercel instances processing the same phone at once."""
     redis = session_manager.redis_client
@@ -332,6 +338,23 @@ async def _process_messages_background(tasks: list) -> None:
         by_phone[phone].append((msg, val))
 
     async def _process_phone_messages(phone: str, phone_tasks: list) -> None:
+        # Merge burst text messages (client sends 3 messages in 5s → process as one)
+        if len(phone_tasks) > 1:
+            text_parts, non_text = [], []
+            last_msg, last_val = phone_tasks[-1]
+            for msg, val in phone_tasks:
+                if msg.get("type") == "text":
+                    body_text = msg.get("text", {}).get("body", "")
+                    if body_text and body_text.strip():
+                        text_parts.append(body_text.strip())
+                else:
+                    non_text.append((msg, val))
+            if len(text_parts) > 1:
+                merged = dict(last_msg)
+                merged["text"] = {"body": "\n".join(text_parts)}
+                logger.info("Burst merge: %d messages from %s → 1", len(text_parts), phone)
+                phone_tasks = non_text + [(merged, last_val)]
+
         for msg, val in phone_tasks:
             try:
                 await _process_message(msg, val)
@@ -424,12 +447,15 @@ async def _process_message(message: dict, value: dict) -> None:
             logger.error("Failed to store message while bot disabled: %s", e)
         return
 
+    # Mark as read immediately — shows double blue tick to client
+    if message_id:
+        await whatsapp_service.mark_as_read(message_id)
+
     # Distributed lock: only one Vercel instance processes this phone at a time
     if not await _acquire_phone_lock(phone_number):
         logger.warning("Phone %s already locked by another instance — skipping", phone_number)
         return
 
-    # Route to AI agent
     try:
         response = await djama_agent.handle_message(
             phone_number=phone_number,
@@ -441,7 +467,6 @@ async def _process_message(message: dict, value: dict) -> None:
             await whatsapp_service.send_text_message(phone_number, response)
     except Exception as e:
         logger.error("Bot error phone=%s: %s\n%s", phone_number, e, traceback.format_exc())
-        # Send a human-sounding message instead of a cold technical error
         try:
             await whatsapp_service.send_text_message(
                 phone_number,
@@ -449,17 +474,17 @@ async def _process_message(message: dict, value: dict) -> None:
             )
         except Exception:
             pass
-        # Silently alert admin without disturbing the client
-        try:
-            await notification_service.notify_handoff(
-                client_phone=phone_number,
-                session_id="",
-                summary=f"Bot crash: {type(e).__name__}: {str(e)[:200]}",
-                is_sensitive=False,
-                tags=["CRASH"]
-            )
-        except Exception:
-            pass
+        if await _crash_notify_allowed(phone_number):
+            try:
+                await notification_service.notify_handoff(
+                    client_phone=phone_number,
+                    session_id="",
+                    summary=f"Bot crash: {type(e).__name__}: {str(e)[:200]}",
+                    is_sensitive=False,
+                    tags=["CRASH"]
+                )
+            except Exception:
+                pass
     finally:
         await _release_phone_lock(phone_number)
 

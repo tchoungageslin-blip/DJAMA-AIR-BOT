@@ -146,6 +146,21 @@ class WhatsAppService:
         )
         return await self.send_text_message(to, message)
 
+    async def mark_as_read(self, message_id: str) -> None:
+        """Send read receipt — shows double blue tick to client immediately."""
+        if not message_id or self.use_vendrix:
+            return
+        payload = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(self.send_url, json=payload, headers=self.headers)
+        except Exception as e:
+            logger.debug("Read receipt failed for %s: %s", message_id, e)
+
     async def download_media(self, media_id: str) -> Optional[bytes]:
         """Download media file via Vendrix or Meta Graph API."""
         async with httpx.AsyncClient(timeout=30.0) as client:

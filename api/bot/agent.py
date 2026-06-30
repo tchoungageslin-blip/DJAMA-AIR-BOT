@@ -99,15 +99,32 @@ class DjamaAgent:
                 )
 
         # 6.5 Rebuild Redis history from DB if Redis was flushed or expired
+        session_recovered = False
         if not session_manager.get_message_history(phone_number):
             recovered = self._rebuild_history_from_db(session["id"])
             if recovered:
+                session_recovered = True
                 for msg in recovered:
                     session_manager.add_message_to_history(phone_number, msg["role"], msg["content"])
                 logger.info("Rebuilt %d messages from DB for %s", len(recovered), phone_number)
 
+        # 6.6 Language detection — persist preference in Redis
+        if message_text:
+            lang = self._detect_language(message_text)
+            if lang == "en":
+                session_manager.update_context(phone_number, {"preferred_language": "en"})
+
+        # 6.7 Frustration detection — auto-escalate if client repeatedly corrects bot
+        if message_text and self._is_client_frustrated(message_text):
+            logger.warning("Frustration detected for %s — escalating", phone_number)
+            return await self._trigger_handoff(
+                client, session, phone_number,
+                "Client frustré: a dû corriger le bot plusieurs fois",
+                tags=["FRUSTRATION"]
+            )
+
         # 7. Build context and get AI response
-        context = self._build_context(client, session, phone_number, vision_data)
+        context = self._build_context(client, session, phone_number, vision_data, session_recovered=session_recovered)
         raw_response = await self._get_ai_response(phone_number, message_text, context)
         response, gap_question = self._extract_knowledge_gap(raw_response)
         if gap_question:
@@ -195,7 +212,7 @@ class DjamaAgent:
         return False, None
 
     def _build_context(self, client: Dict, session: Dict, phone_number: str,
-                       vision_data: Optional[Dict] = None) -> str:
+                       vision_data: Optional[Dict] = None, session_recovered: bool = False) -> str:
         """Build additional context for the AI prompt including persistent client memory."""
         from api.db.queries import OrderQueries as _OQ
         context_parts = []
@@ -247,6 +264,27 @@ class DjamaAgent:
         if redis_context:
             if redis_context.get("current_lead"):
                 context_parts.append(f"[SESSION] Donnees en cours: {json.dumps(redis_context['current_lead'], ensure_ascii=False)}")
+            if redis_context.get("preferred_language") == "en":
+                context_parts.append("[SESSION] LANGUE CLIENT: ANGLAIS — ALL your responses MUST be in English only.")
+
+        # Recovery annotation: bot knows it's resuming a previous conversation
+        if session_recovered:
+            context_parts.append(
+                "[SESSION] REPRISE APRÈS INTERRUPTION: l'historique ci-dessous a été récupéré depuis la base de données. "
+                "Tu reprends exactement là où vous en étiez. NE recommence PAS depuis le début. "
+                "Identifie les infos déjà collectées dans l'historique et pose UNIQUEMENT les questions manquantes."
+            )
+
+        # Qualification checklist: tell bot what it already knows and what's missing
+        history = session_manager.get_message_history(phone_number)
+        if history:
+            qual = self._extract_qualification_fields(history)
+            if qual:
+                fret_fields = ["origine", "destination", "poids", "mode", "marchandise"]
+                missing = [f for f in fret_fields if f not in qual]
+                context_parts.append(f"[SESSION] INFOS DÉJÀ COLLECTÉES: {json.dumps(qual, ensure_ascii=False)}")
+                if missing:
+                    context_parts.append(f"[SESSION] INFOS ENCORE MANQUANTES: {', '.join(missing)}")
 
         # Vision data
         if vision_data:
@@ -306,7 +344,18 @@ class DjamaAgent:
                 temperature=0.7,
             )
             raw = response.choices[0].message.content.strip()
-            return self._sanitize_response(raw)
+            sanitized = self._sanitize_response(raw)
+            # Quality guard: retry with more tokens if response looks truncated
+            if len(sanitized) >= 390 and sanitized[-1] not in ".!?»":
+                logger.warning("Response may be truncated (%d chars), retrying with higher limit", len(sanitized))
+                retry_r = await client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=_build_messages(),
+                    max_tokens=600,
+                    temperature=0.7,
+                )
+                sanitized = self._sanitize_response(retry_r.choices[0].message.content.strip())
+            return sanitized
         except Exception as first_err:
             logger.warning("LLM first attempt failed (%s), retrying with minimal context", type(first_err).__name__)
             try:
@@ -337,6 +386,76 @@ class DjamaAgent:
             and "FIN BLOC CONFIDENTIEL" not in line
         ]
         return "\n".join(clean).strip()
+
+    def _detect_language(self, text: str) -> str:
+        """Detect if message is in English (returns 'en') or French ('fr')."""
+        english_indicators = {"hello", "hi", "want", "send", "ship", "shipment", "package",
+                               "how", "much", "when", "what", "can", "help", "please", "need",
+                               "i", "my", "we", "from", "to", "the", "a", "is", "are", "have"}
+        words = set(text.lower().split())
+        if len(words & english_indicators) >= 2:
+            return "en"
+        return "fr"
+
+    def _is_client_frustrated(self, text: str) -> bool:
+        """Detect frustration signals that warrant immediate human handoff."""
+        import re
+        patterns = [
+            r"j['\s]ai d[eé]j[aà] dit",
+            r"je vous ai d[eé]j[aà] (dit|donn[eé]|r[eé]pondu)",
+            r"combien de fois",
+            r"pourquoi (vous )?r[eé]p[eé]tez",
+            r"c['\s]est la .{1,10} fois (que|où)",
+            r"vous n['\s][eé]coutez pas",
+            r"vous [eê]tes nul",
+            r"bot (inutile|nul|mauvais)",
+        ]
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+
+    def _extract_qualification_fields(self, history: list) -> dict:
+        """Extract FRET qualification fields from conversation history."""
+        import re
+        full = " ".join(m.get("content", "") for m in history).lower()
+        fields = {}
+        # Origin
+        origins = {"chine": "Chine", "china": "Chine", "france": "France",
+                   "royaume-uni": "Royaume-Uni", "uk": "Royaume-Uni",
+                   "canada": "Canada", "usa": "USA", "états-unis": "USA",
+                   "belgique": "Belgique", "dubaï": "Dubaï", "dubai": "Dubaï"}
+        for kw, label in origins.items():
+            if kw in full:
+                fields["origine"] = label
+                break
+        # Destination
+        destinations = ["douala", "yaoundé", "yaounde", "bafoussam", "garoua",
+                        "maroua", "bertoua", "bamenda", "limbe", "kribi"]
+        for city in destinations:
+            if city in full:
+                fields["destination"] = city.title()
+                break
+        # Weight
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*kg', full)
+        if m:
+            fields["poids"] = f"{m.group(1)}kg"
+        # Mode
+        if re.search(r'\bmaritim\b|\bsea\b|\bbateau\b|\bnavire\b', full):
+            fields["mode"] = "Maritime"
+        elif re.search(r'\baérien\b|\bair\b|\bavion\b', full):
+            fields["mode"] = "Aérien"
+        # Goods (basic)
+        goods_patterns = [
+            (r'rob[e]s?\b', "Robes"), (r'v[eê]tement', "Vêtements"),
+            (r'chaussure', "Chaussures"), (r'électronique|téléphone|télé\b', "Électronique"),
+            (r'alimentaire|nourriture', "Alimentaire"), (r'cosmétique|beauté', "Cosmétiques"),
+        ]
+        for pattern, label in goods_patterns:
+            if re.search(pattern, full):
+                fields["marchandise"] = label
+                break
+        return fields
 
     def _rebuild_history_from_db(self, session_id: str) -> list:
         """Recover conversation history from PostgreSQL when Redis is empty or expired."""

@@ -34,8 +34,9 @@ class Settings:
     VENDRIX_API_URL: str = os.getenv("VENDRIX_API_URL", "https://vendrix.net")
     VENDRIX_WEBHOOK_SECRET: str = os.getenv("VENDRIX_WEBHOOK_SECRET", "")
 
-    # Meta WhatsApp webhook verification token
+    # Meta WhatsApp webhook verification token + app secret for signature validation
     WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", os.getenv("VENDRIX_WEBHOOK_SECRET", ""))
+    META_APP_SECRET: str = os.getenv("META_APP_SECRET", "")
 
     # Auth — no default in production
     JWT_SECRET: str = _require("JWT_SECRET")
