@@ -301,6 +301,26 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
 
+async def _acquire_phone_lock(phone: str, timeout: int = 45) -> bool:
+    """Distributed lock: prevent two Vercel instances processing the same phone at once."""
+    redis = session_manager.redis_client
+    if not redis:
+        return True
+    try:
+        return redis.set(f"proc_lock:{phone}", "1", nx=True, ex=timeout) is not None
+    except Exception:
+        return True  # Redis error → allow processing
+
+
+async def _release_phone_lock(phone: str) -> None:
+    redis = session_manager.redis_client
+    if redis:
+        try:
+            redis.delete(f"proc_lock:{phone}")
+        except Exception:
+            pass
+
+
 async def _process_messages_background(tasks: list) -> None:
     """Process incoming messages sequentially per phone number to avoid race conditions.
     Messages from different phones can run in parallel; same phone always sequential."""
@@ -404,6 +424,11 @@ async def _process_message(message: dict, value: dict) -> None:
             logger.error("Failed to store message while bot disabled: %s", e)
         return
 
+    # Distributed lock: only one Vercel instance processes this phone at a time
+    if not await _acquire_phone_lock(phone_number):
+        logger.warning("Phone %s already locked by another instance — skipping", phone_number)
+        return
+
     # Route to AI agent
     try:
         response = await djama_agent.handle_message(
@@ -412,24 +437,31 @@ async def _process_message(message: dict, value: dict) -> None:
             media_data=media_data,
             media_type=media_type
         )
-
-        # Send response if bot generated one
         if response:
             await whatsapp_service.send_text_message(phone_number, response)
     except Exception as e:
-        # Log error with full traceback for debugging
-        error_detail = traceback.format_exc()
-        logger.error("Webhook error phone=%s: %s\n%s", phone_number, e, error_detail)
-
-        # Notify about the error
-        error_msg = (
-            "Désolé, je rencontre un problème technique. "
-            "Un conseiller va vous répondre rapidement."
-        )
+        logger.error("Bot error phone=%s: %s\n%s", phone_number, e, traceback.format_exc())
+        # Send a human-sounding message instead of a cold technical error
         try:
-            await whatsapp_service.send_text_message(phone_number, error_msg)
-        except Exception as send_err:
-            logger.error("Failed to send error message to %s: %s", phone_number, send_err)
+            await whatsapp_service.send_text_message(
+                phone_number,
+                "Je reviens vers vous dans quelques instants, un conseiller Djama Air prend le relais."
+            )
+        except Exception:
+            pass
+        # Silently alert admin without disturbing the client
+        try:
+            await notification_service.notify_handoff(
+                client_phone=phone_number,
+                session_id="",
+                summary=f"Bot crash: {type(e).__name__}: {str(e)[:200]}",
+                is_sensitive=False,
+                tags=["CRASH"]
+            )
+        except Exception:
+            pass
+    finally:
+        await _release_phone_lock(phone_number)
 
 
 @app.get("/api/cron/timeout-sessions")

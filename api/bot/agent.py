@@ -98,6 +98,14 @@ class DjamaAgent:
                     tags=["CAS_SENSIBLE", keyword.upper()]
                 )
 
+        # 6.5 Rebuild Redis history from DB if Redis was flushed or expired
+        if not session_manager.get_message_history(phone_number):
+            recovered = self._rebuild_history_from_db(session["id"])
+            if recovered:
+                for msg in recovered:
+                    session_manager.add_message_to_history(phone_number, msg["role"], msg["content"])
+                logger.info("Rebuilt %d messages from DB for %s", len(recovered), phone_number)
+
         # 7. Build context and get AI response
         context = self._build_context(client, session, phone_number, vision_data)
         raw_response = await self._get_ai_response(phone_number, message_text, context)
@@ -272,47 +280,87 @@ class DjamaAgent:
         return base
 
     async def _get_ai_response(self, phone_number: str, user_message: str, context: str) -> str:
-        """Get response from GPT-4o via OpenRouter."""
-        # Build messages array with history
-        messages = [{"role": "system", "content": self._get_system_prompt()}]
+        """Get response from LLM via OpenRouter. Retries with minimal context on failure."""
 
-        if context:
-            messages.append({"role": "system", "content": f"CONTEXTE ACTUEL:\n{context}"})
+        def _build_messages(include_history: bool = True, include_context: bool = True) -> list:
+            msgs = [{"role": "system", "content": self._get_system_prompt()}]
+            if include_context and context:
+                # Explicit wrapper tells the LLM this block must NEVER appear in its response
+                msgs.append({"role": "system", "content": (
+                    "⚠ BLOC CONFIDENTIEL — NE JAMAIS INCLURE CES DONNÉES DANS TA RÉPONSE ⚠\n"
+                    f"{context}\n"
+                    "⚠ FIN BLOC CONFIDENTIEL ⚠"
+                )})
+            if include_history:
+                for msg in session_manager.get_message_history(phone_number)[-10:]:
+                    msgs.append({"role": msg["role"], "content": msg["content"]})
+            msgs.append({"role": "user", "content": user_message or "[Le client a envoyé un média]"})
+            return msgs
 
-        # Add conversation history from Redis
-        history = session_manager.get_message_history(phone_number)
-        for msg in history[-10:]:  # Last 10 messages for context window
-            messages.append({"role": msg["role"], "content": msg["content"]})
-
-        # Add current message
-        messages.append({"role": "user", "content": user_message or "[Le client a envoyé un média]"})
-
-        # Fresh client per request to prevent stale serverless connections
         client = self._create_openai_client()
         try:
             response = await client.chat.completions.create(
                 model=settings.LLM_MODEL,
-                messages=messages,
+                messages=_build_messages(),
                 max_tokens=400,
                 temperature=0.7,
             )
             raw = response.choices[0].message.content.strip()
             return self._sanitize_response(raw)
-        except Exception as e:
-            logger.error("LLM error %s: %s\n%s", type(e).__name__, e, traceback.format_exc())
-            raise
+        except Exception as first_err:
+            logger.warning("LLM first attempt failed (%s), retrying with minimal context", type(first_err).__name__)
+            try:
+                # Retry without history — reduce tokens/context that may have caused the error
+                response = await client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=_build_messages(include_history=False, include_context=False),
+                    max_tokens=200,
+                    temperature=0.7,
+                )
+                raw = response.choices[0].message.content.strip()
+                logger.info("LLM retry succeeded (minimal context) for %s", phone_number)
+                return self._sanitize_response(raw)
+            except Exception as retry_err:
+                logger.error("LLM retry also failed: %s\n%s", retry_err, traceback.format_exc())
+                raise first_err  # Raise original error for caller to handle
         finally:
             await client.close()
 
     def _sanitize_response(self, text: str) -> str:
-        """Strip internal context tags the LLM may have leaked. Keeps [GAP:] for later extraction."""
+        """Strip internal context tags and confidential block markers the LLM may have leaked."""
         import re
         lines = text.splitlines()
         clean = [
             line for line in lines
             if not re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE)\]', line, re.IGNORECASE)
+            and "BLOC CONFIDENTIEL" not in line
+            and "FIN BLOC CONFIDENTIEL" not in line
         ]
         return "\n".join(clean).strip()
+
+    def _rebuild_history_from_db(self, session_id: str) -> list:
+        """Recover conversation history from PostgreSQL when Redis is empty or expired."""
+        try:
+            rows = execute_query(
+                """SELECT sender, content FROM messages
+                   WHERE session_id = %s
+                   AND content NOT IN ('[media]', '[media envoyé]')
+                   AND content NOT LIKE '[%'
+                   AND length(content) > 3
+                   ORDER BY created_at DESC LIMIT 20""",
+                (session_id,),
+                fetch_all=True
+            )
+            if not rows:
+                return []
+            messages = []
+            for row in reversed(rows):
+                role = "user" if row["sender"] == "client" else "assistant"
+                messages.append({"role": role, "content": row["content"]})
+            return messages
+        except Exception as e:
+            logger.error("DB history recovery failed: %s", e)
+            return []
 
     def _extract_knowledge_gap(self, text: str) -> Tuple[str, Optional[str]]:
         """Extract [GAP: question] tag. Returns (clean_text, gap_question or None)."""
