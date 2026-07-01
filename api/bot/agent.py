@@ -376,15 +376,22 @@ class DjamaAgent:
             await client.close()
 
     def _sanitize_response(self, text: str) -> str:
-        """Strip internal context tags and confidential block markers the LLM may have leaked."""
+        """Strip all internal tags and markers before sending to client."""
         import re
         lines = text.splitlines()
-        clean = [
-            line for line in lines
-            if not re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE)\]', line, re.IGNORECASE)
-            and "BLOC CONFIDENTIEL" not in line
-            and "FIN BLOC CONFIDENTIEL" not in line
-        ]
+        clean = []
+        for line in lines:
+            # Drop lines that are nothing but an internal tag
+            if re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE|WORKFLOW|ACTION)\b', line, re.IGNORECASE):
+                continue
+            if "BLOC CONFIDENTIEL" in line or "FIN BLOC CONFIDENTIEL" in line:
+                continue
+            # Strip inline occurrences — keep [ACTION: TRANSFERT] for upstream handler
+            line = re.sub(r'\[ACTION:\s*(?!TRANSFERT\b)[^\]]+\]', '', line, flags=re.IGNORECASE)
+            line = re.sub(r'\[WORKFLOW:[^\]]*\]', '', line, flags=re.IGNORECASE)
+            line = re.sub(r'\[(MEMOIRE|SESSION|CONTEXTE)\][^\n]*', '', line, flags=re.IGNORECASE)
+            if line.strip():
+                clean.append(line)
         return "\n".join(clean).strip()
 
     def _detect_language(self, text: str) -> str:
