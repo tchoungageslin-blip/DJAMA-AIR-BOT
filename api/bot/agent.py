@@ -345,9 +345,20 @@ class DjamaAgent:
             )
             raw = response.choices[0].message.content.strip()
             sanitized = self._sanitize_response(raw)
-            # Quality guard: retry with more tokens if response looks truncated
-            if len(sanitized) >= 390 and sanitized[-1] not in ".!?»":
-                logger.warning("Response may be truncated (%d chars), retrying with higher limit", len(sanitized))
+
+            def _looks_truncated(s: str) -> bool:
+                if not s:
+                    return True
+                # Very short response that ends mid-sentence (no terminal punctuation)
+                if len(s) < 25 and s[-1] not in ".!?»:":
+                    return True
+                # Long response at token limit that ends mid-sentence
+                if len(s) >= 390 and s[-1] not in ".!?»":
+                    return True
+                return False
+
+            if _looks_truncated(sanitized):
+                logger.warning("Response looks truncated (%d chars: %r), retrying", len(sanitized), sanitized[:40])
                 retry_r = await client.chat.completions.create(
                     model=settings.LLM_MODEL,
                     messages=_build_messages(),
@@ -376,17 +387,20 @@ class DjamaAgent:
             await client.close()
 
     def _sanitize_response(self, text: str) -> str:
-        """Strip all internal tags and markers before sending to client."""
+        """Strip all internal tags and markers before sending to client.
+        IMPORTANT: [ACTION: TRANSFERT] must be preserved — it's consumed by the caller."""
         import re
         lines = text.splitlines()
         clean = []
         for line in lines:
-            # Drop lines that are nothing but an internal tag
-            if re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE|WORKFLOW|ACTION)\b', line, re.IGNORECASE):
-                continue
             if "BLOC CONFIDENTIEL" in line or "FIN BLOC CONFIDENTIEL" in line:
                 continue
-            # Strip inline occurrences — keep [ACTION: TRANSFERT] for upstream handler
+            # Drop whole-line tags — but KEEP [ACTION: TRANSFERT] for upstream handler
+            if re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE|WORKFLOW)\b', line, re.IGNORECASE):
+                continue
+            if re.match(r'^\s*\[ACTION:\s*(?!TRANSFERT\b)', line, re.IGNORECASE):
+                continue
+            # Inline-strip: remove embedded tags except [ACTION: TRANSFERT]
             line = re.sub(r'\[ACTION:\s*(?!TRANSFERT\b)[^\]]+\]', '', line, flags=re.IGNORECASE)
             line = re.sub(r'\[WORKFLOW:[^\]]*\]', '', line, flags=re.IGNORECASE)
             line = re.sub(r'\[(MEMOIRE|SESSION|CONTEXTE)\][^\n]*', '', line, flags=re.IGNORECASE)
