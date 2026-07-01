@@ -130,10 +130,16 @@ class DjamaAgent:
         if gap_question:
             self._save_knowledge_gap(gap_question, phone_number, session["id"])
 
-        # 8. Check for manual handoff triggered by the LLM
-        if "[ACTION: TRANSFERT]" in response:
-            response = response.replace("[ACTION: TRANSFERT]", "").strip()
-            # This is a normal order completion, NOT a hard handoff
+        # 8. Check for order completion triggered by the LLM
+        # Primary: explicit tag (case-insensitive so Gemini variant casing doesn't matter)
+        # Fallback: LLM said the closure phrase but forgot the tag
+        import re as _re
+        _has_transfert_tag = bool(_re.search(r'\[action:\s*transfert\]', response, _re.IGNORECASE))
+        _has_closure_phrase = self._is_closure_response(response)
+        if _has_transfert_tag or _has_closure_phrase:
+            response = _re.sub(r'\[action:\s*transfert\]', '', response, flags=_re.IGNORECASE).strip()
+            if _has_closure_phrase and not _has_transfert_tag:
+                logger.info("TRANSFERT detected via closure phrase (tag missing) for %s", phone_number)
             return await self._finalize_order(
                 client, session, phone_number,
                 response
@@ -407,6 +413,21 @@ class DjamaAgent:
             if line.strip():
                 clean.append(line)
         return "\n".join(clean).strip()
+
+    def _is_closure_response(self, response: str) -> bool:
+        """True if the bot response is a conversation-closing handoff statement.
+        Used as fallback when the LLM forgets to add [ACTION: TRANSFERT]."""
+        import re
+        r = response.lower()
+        # Must contain a clear handoff/closure phrase
+        closure_patterns = [
+            r"(?:votre (?:commande|demande|dossier))? (?:a bien |est )(?:été |)(?:prise?|enregistr[eé]e?|not[eé]e?) en compte",
+            r"nous vous recontacte(?:rons|rez)",
+            r"notre (?:équipe|conseiller) (?:va |)(?:vous |)(?:revenir|contacter|prendre en charge)",
+            r"your (?:order|request) (?:has been |)(?:received|taken into account|processed)",
+            r"we (?:will |shall )(?:get back|contact|reach out)",
+        ]
+        return any(re.search(p, r) for p in closure_patterns)
 
     def _detect_language(self, text: str) -> str:
         """Detect if message is in English (returns 'en') or French ('fr')."""
