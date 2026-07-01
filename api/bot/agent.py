@@ -661,15 +661,17 @@ class DjamaAgent:
         # 1. Generate structured JSON summary from conversation
         summary_json_str = await self.generate_handoff_summary(session["id"])
         summary_data = {}
+        # Safe defaults — prevents NameError if JSON parse or order creation fails
+        order_data: dict = {"notes": "Commande finalisée"}
+        order_type: str = "AUTRE"
+        est_price = None
 
         try:
             clean_str = summary_json_str.replace("```json", "").replace("```", "").strip()
             summary_data = json.loads(clean_str)
 
-            # Collect media attachments from the session (photos, docs — no audio)
             attachments = self._collect_session_media(session["id"])
 
-            # Create Order
             order_data = {
                 "origin": summary_data.get("origin"),
                 "destination": summary_data.get("destination"),
@@ -683,45 +685,37 @@ class DjamaAgent:
                 "attachments": attachments,
             }
             order_type = summary_data.get("order_type", "AUTRE")
-            logger.info("Order order_type=%s session=%s attachments=%d", order_type, session["id"], len(attachments))
             est_price_raw = summary_data.get("estimated_price")
             est_price = int(est_price_raw) if est_price_raw and str(est_price_raw).isdigit() else None
 
+            logger.info("Order order_type=%s session=%s attachments=%d", order_type, session["id"], len(attachments))
             OrderQueries.create(client["id"], order_type, order_data, est_price)
-            
-            # Update client name if found and missing
+
             extracted_name = summary_data.get("client_name")
             if extracted_name and str(extracted_name).lower() != "null" and not client.get("first_name"):
                 ClientQueries.update(client["id"], first_name=extracted_name)
-                
+
         except Exception as e:
             logger.error("Order: error parsing summary or creating order: %s | raw=%s", e, summary_json_str[:200])
-            summary_data = {"notes": f"Erreur système ou IA. Détails bruts: {summary_json_str}"}
+            order_data["error"] = str(e)
+            order_data["raw_summary"] = summary_json_str[:300]
             try:
-                # Force fallback order creation to avoid silent drops
-                OrderQueries.create(
-                    client["id"], 
-                    "AUTRE", 
-                    {"notes": summary_data["notes"], "error": str(e)}, 
-                    None
-                )
+                OrderQueries.create(client["id"], "AUTRE", order_data, None)
             except Exception as fallback_e:
-                logger.critical("Order: fallback order creation failed: %s", fallback_e)
+                logger.critical("Order: fallback creation failed: %s", fallback_e)
 
-        # Close the current session so next message starts fresh
-        # This prevents mixing old conversation context with new requests
         SessionQueries.update_status(session["id"], "RESOLVED", ai_summary=summary_data.get("notes", "Commande finalisée"))
-
-        # Clear Redis conversation history so next session starts clean
         session_manager.clear_context(phone_number)
 
-        # Send notification to agents that a new order is ready
-        await notification_service.notify_new_order(
-            client_phone=phone_number,
-            session_id=session["id"],
-            summary=f"Nouvelle commande créée: {summary_data.get('notes', '')}",
-            order_data=order_data,
-        )
+        try:
+            await notification_service.notify_new_order(
+                client_phone=phone_number,
+                session_id=session["id"],
+                summary=f"Nouvelle commande créée: {summary_data.get('notes', order_type)}",
+                order_data=order_data,
+            )
+        except Exception as notif_e:
+            logger.error("Order: notification failed (order was still created): %s", notif_e)
 
         # Store the bot response
         MessageQueries.create(
