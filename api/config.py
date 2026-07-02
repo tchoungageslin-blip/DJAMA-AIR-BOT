@@ -14,7 +14,7 @@ class Settings:
     # LLM (OpenRouter)
     OPENROUTER_API_KEY: str = _require("OPENROUTER_API_KEY")
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "google/gemini-2.5-flash-lite")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
     VISION_MODEL: str = os.getenv("VISION_MODEL", "google/gemini-2.5-flash-lite")
 
     # Audio Transcription

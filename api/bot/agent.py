@@ -396,20 +396,24 @@ class DjamaAgent:
         """Strip all internal tags and markers before sending to client.
         IMPORTANT: [ACTION: TRANSFERT] must be preserved — it's consumed by the caller."""
         import re
+        # A weak model sometimes echoes the whole prompt scaffold — drop the block.
+        text = re.sub(r'\[CONTEXTE ACTUEL\].*?\[/?\s*CONTEXTE ACTUEL\]', '', text, flags=re.S | re.I)
+        # Internal tag labels the client must never see (accents/spacing tolerant).
+        tag = (r'MEMOIRE|SESSION|WORKFLOW|CONTEXTE(?:\s+ACTUEL)?|'
+               r'R[ÉE]PONSE\s+PR[ÉE]C[ÉE]DENTE|NOUVELLE\s+DEMANDE(?:\s+CLIENT)?|'
+               r'BLOC\s+CONFIDENTIEL|FIN\s+BLOC\s+CONFIDENTIEL')
         lines = text.splitlines()
         clean = []
         for line in lines:
-            if "BLOC CONFIDENTIEL" in line or "FIN BLOC CONFIDENTIEL" in line:
+            # Drop whole-line internal tags (tolerate a leading '/', e.g. [/CONTEXTE ACTUEL]).
+            if re.match(rf'^\s*\[/?\s*(?:{tag})\b', line, re.IGNORECASE):
                 continue
-            # Drop whole-line tags — but KEEP [ACTION: TRANSFERT] for upstream handler
-            if re.match(r'^\s*\[(MEMOIRE|SESSION|CONTEXTE|WORKFLOW)\b', line, re.IGNORECASE):
-                continue
+            # Drop whole-line non-TRANSFERT actions.
             if re.match(r'^\s*\[ACTION:\s*(?!TRANSFERT\b)', line, re.IGNORECASE):
                 continue
-            # Inline-strip: remove embedded tags except [ACTION: TRANSFERT]
-            line = re.sub(r'\[ACTION:\s*(?!TRANSFERT\b)[^\]]+\]', '', line, flags=re.IGNORECASE)
-            line = re.sub(r'\[WORKFLOW:[^\]]*\]', '', line, flags=re.IGNORECASE)
-            line = re.sub(r'\[(MEMOIRE|SESSION|CONTEXTE)\][^\n]*', '', line, flags=re.IGNORECASE)
+            # Inline-strip embedded tags — but KEEP [ACTION: TRANSFERT] for the upstream handler.
+            line = re.sub(r'\[ACTION:\s*(?!TRANSFERT\b)[^\]]*\]', '', line, flags=re.IGNORECASE)
+            line = re.sub(rf'\[/?\s*(?:{tag})[^\]]*\]', '', line, flags=re.IGNORECASE)
             if line.strip():
                 clean.append(line)
         return "\n".join(clean).strip()
