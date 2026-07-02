@@ -34,8 +34,10 @@ export default function InboxPage() {
   const [search, setSearch] = useState<string>("");
   const [hideTest, setHideTest] = useState<boolean>(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const selectedSessionRef = useRef<Session | null>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevMessageCountRef = useRef<number>(0);
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -81,9 +83,29 @@ export default function InboxPage() {
     return () => clearInterval(interval);
   }, [selectedSession?.id]);
 
-  // Scroll to bottom when new messages arrive
+  // Scroll to bottom only when a genuinely new message arrives
+  // and the user is already near the bottom (don't interrupt manual scrolling)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = messagesContainerRef.current;
+    const newCount = messages.length;
+    const prevCount = prevMessageCountRef.current;
+    prevMessageCountRef.current = newCount;
+
+    if (newCount === 0) return;
+
+    const isNewMessage = newCount > prevCount;
+    if (!isNewMessage) return; // refresh cycle with same messages — don't scroll
+
+    if (!container) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+
+    // Only auto-scroll if user is within 120px of the bottom
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom <= 120) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   const handleSearchChange = (value: string) => {
@@ -110,6 +132,8 @@ export default function InboxPage() {
 
   const selectSession = async (session: Session) => {
     setSelectedSession(session);
+    prevMessageCountRef.current = 0; // reset so initial load scrolls to bottom
+    setMessages([]);
     try {
       const res = await fetch(`/api/dashboard/sessions/${session.id}/messages`);
       if (res.ok) {
@@ -350,7 +374,7 @@ export default function InboxPage() {
             )}
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3">
               {messages.map((msg) => (
                 <div
                   key={msg.id}
