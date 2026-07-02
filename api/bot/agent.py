@@ -342,14 +342,24 @@ class DjamaAgent:
             return msgs
 
         client = self._create_openai_client()
+        # Gemini 2.5 Flash has thinking mode on by default — disable it so reasoning
+        # doesn't leak into the message text sent to the client.
+        _extra = {"thinking": {"type": "disabled"}} if "gemini" in settings.LLM_MODEL.lower() else {}
         try:
             response = await client.chat.completions.create(
                 model=settings.LLM_MODEL,
                 messages=_build_messages(),
                 max_tokens=400,
                 temperature=0.7,
+                extra_body=_extra if _extra else None,
             )
-            raw = response.choices[0].message.content.strip()
+            # Also check reasoning_content field (OpenRouter exposes it separately for some models)
+            raw_content = response.choices[0].message.content or ""
+            reasoning = getattr(response.choices[0].message, "reasoning_content", None) or ""
+            # If reasoning == content, the model only returned thinking — use empty string
+            if reasoning and raw_content.strip() == reasoning.strip():
+                raw_content = ""
+            raw = raw_content.strip()
             sanitized = self._sanitize_response(raw)
 
             def _looks_truncated(s: str) -> bool:
@@ -393,25 +403,38 @@ class DjamaAgent:
             await client.close()
 
     def _sanitize_response(self, text: str) -> str:
-        """Strip all internal tags and markers before sending to client.
-        IMPORTANT: [ACTION: TRANSFERT] must be preserved — it's consumed by the caller."""
+        """Strip all internal tags, reasoning traces, and confidential markers.
+        IMPORTANT: [ACTION: TRANSFERT] must be preserved — consumed by the caller."""
         import re
-        # A weak model sometimes echoes the whole prompt scaffold — drop the block.
+
+        # 0. Strip Gemini chain-of-thought reasoning that leaks into the response.
+        #    Gemini 2.5 Flash writes its thinking in 3rd-person French/English before
+        #    the actual 2nd-person client response. We drop those reasoning lines.
+        #    Also remove conversation-echo blocks (training-data style timestamps).
+        text = re.sub(r'\d{4}-\d{2}-\d{2}[T \t]\d{2}:\d{2}[^\n]*\n?', '', text)
+        text = re.compile(
+            r'^(?:[-•*]\s*)?(?:'
+            r"L['’]utilisateur|Le client|Il s['’]agit|Il faut (?:donc|maintenant)|"
+            r"Je dois(?:\s+maintenant)?|Nous devons|"
+            r"The user|The client|I (?:need|should|must|will now|have to)\b"
+            r')[^\n]*$',
+            re.IGNORECASE | re.MULTILINE
+        ).sub('', text)
+
+        # 1. A weak model sometimes echoes the whole prompt scaffold — drop the block.
         text = re.sub(r'\[CONTEXTE ACTUEL\].*?\[/?\s*CONTEXTE ACTUEL\]', '', text, flags=re.S | re.I)
-        # Internal tag labels the client must never see (accents/spacing tolerant).
+
+        # 2. Internal tag labels the client must never see (accents/spacing tolerant).
         tag = (r'MEMOIRE|SESSION|WORKFLOW|CONTEXTE(?:\s+ACTUEL)?|'
                r'R[ÉE]PONSE\s+PR[ÉE]C[ÉE]DENTE|NOUVELLE\s+DEMANDE(?:\s+CLIENT)?|'
                r'BLOC\s+CONFIDENTIEL|FIN\s+BLOC\s+CONFIDENTIEL')
         lines = text.splitlines()
         clean = []
         for line in lines:
-            # Drop whole-line internal tags (tolerate a leading '/', e.g. [/CONTEXTE ACTUEL]).
             if re.match(rf'^\s*\[/?\s*(?:{tag})\b', line, re.IGNORECASE):
                 continue
-            # Drop whole-line non-TRANSFERT actions.
             if re.match(r'^\s*\[ACTION:\s*(?!TRANSFERT\b)', line, re.IGNORECASE):
                 continue
-            # Inline-strip embedded tags — but KEEP [ACTION: TRANSFERT] for the upstream handler.
             line = re.sub(r'\[ACTION:\s*(?!TRANSFERT\b)[^\]]*\]', '', line, flags=re.IGNORECASE)
             line = re.sub(rf'\[/?\s*(?:{tag})[^\]]*\]', '', line, flags=re.IGNORECASE)
             if line.strip():
