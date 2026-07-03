@@ -309,7 +309,7 @@ class DjamaAgent:
         return "\n".join(context_parts)
 
     def _get_system_prompt(self) -> str:
-        """Load system prompt from DB (admin override or default), then append answered knowledge."""
+        """Load system prompt, then append live pricing from DB + answered knowledge."""
         try:
             row = execute_query(
                 "SELECT value FROM settings WHERE key = 'system_prompt'",
@@ -318,10 +318,51 @@ class DjamaAgent:
             base = row["value"] if row and row.get("value") else SYSTEM_PROMPT
         except Exception:
             base = SYSTEM_PROMPT
+        pricing = self._get_live_pricing()
+        if pricing:
+            base = base + "\n\n" + pricing
         knowledge = self._get_bot_knowledge()
         if knowledge:
             base = base + "\n\n" + knowledge
         return base
+
+    def _get_live_pricing(self) -> str:
+        """Load pricing from pricing_grids table and format for LLM injection.
+        These prices override the static ones in the prompt — always use these."""
+        try:
+            rows = execute_query(
+                "SELECT mode, origin, rules, currency FROM pricing_grids WHERE valid_until IS NULL ORDER BY mode",
+                fetch_all=True
+            )
+            if not rows:
+                return ""
+            mode_labels = {
+                "aerien_chine": "AÉRIEN — Chine → Cameroun",
+                "aerien_international": "AÉRIEN — Autres origines (USA, Europe, Canada, Inde, Malaisie) → Cameroun",
+                "maritime": "MARITIME — Chine → Cameroun (tarif au CBM = mètre cube)",
+                "dhl_express": "DHL EXPRESS",
+                "gros_volumes_export": "GROS VOLUMES — Export Cameroun",
+            }
+            lines = ["### TARIFS EN VIGUEUR (source: base de données — utilise CES tarifs, pas ceux plus haut)"]
+            for row in rows:
+                label = mode_labels.get(row["mode"], row["mode"].upper())
+                lines.append(f"\n**{label}** (origine: {row['origin']}) :")
+                rules = row["rules"] if isinstance(row["rules"], list) else []
+                for r in rules:
+                    cur = row["currency"]
+                    if "price_per_kg" in r:
+                        lines.append(f"  - {r['min_weight']} à {r['max_weight']} kg : {r['price_per_kg']:,} {cur}/kg".replace(",", " "))
+                    elif "price_per_cbm" in r:
+                        lines.append(f"  - {r['min_weight']} à {r['max_weight']} kg équivalent : {r['price_per_cbm']:,} {cur}/CBM".replace(",", " "))
+                    elif "price_per_tonne" in r:
+                        lines.append(f"  - +{r['min_weight']} kg : {r['price_per_tonne']:,} {cur}/tonne".replace(",", " "))
+                    elif "price_fixed" in r:
+                        lines.append(f"  - {r['min_weight']} à {r['max_weight']} kg : {r['price_fixed']:,} {cur} (forfait)".replace(",", " "))
+            lines.append("\nNote maritime: CBM = mètre cube. Calculé sur le volume réel du colis. 1 CBM = L×l×H en mètres.")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error("Failed to load live pricing: %s", e)
+            return ""
 
     async def _get_ai_response(self, phone_number: str, user_message: str, context: str) -> str:
         """Get response from LLM via OpenRouter. Retries with minimal context on failure."""
