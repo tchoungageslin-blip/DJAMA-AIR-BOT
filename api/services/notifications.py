@@ -97,9 +97,11 @@ class NotificationService:
 
     async def _wa_task(self, event_type: str, number: str, client_phone: str,
                        summary: str, session_id: str, prefix: str) -> None:
+        wa_digits = client_phone.lstrip("+")
+        wa_link = f"https://wa.me/{wa_digits}"
         msg = (
             f"{prefix}\n\n"
-            f"Client: {client_phone}\n"
+            f"Client: {wa_link}\n"
             f"Résumé: {summary}\n\n"
             f"Connectez-vous au dashboard pour traiter."
         )
